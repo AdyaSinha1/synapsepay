@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-ivory font-sans text-ink antialiased;
+}
+
+.card {
+  @apply rounded-2xl border border-line bg-white shadow-card;
+}
+
+.chip {
+  @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide;
+}
+
+.btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.btn-volt {
+  @apply btn border border-volt-deep bg-volt text-volt-ink shadow-volt;
+}
+.btn-volt:hover:not(:disabled) {
+  @apply -translate-y-px brightness-[1.03];
+}
+.btn-volt:active:not(:disabled) {
+  @apply translate-y-px shadow-none;
+}
+
+.btn-plum {
+  @apply btn bg-plum-900 text-white shadow-plum;
+}
+.btn-plum:hover:not(:disabled) {
+  @apply -translate-y-px bg-plum-800;
+}
+.btn-plum:active:not(:disabled) {
+  @apply translate-y-px shadow-none;
+}
+
+.btn-ghost {
+  @apply btn border border-plum-900/25 bg-white text-ink hover:border-plum-900/50;
+}
+
+.console {
+  @apply overflow-auto rounded-xl border border-line bg-[#FBFAF5] font-mono text-[11px] leading-relaxed;
+}
+.console::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.console::-webkit-scrollbar-thumb {
+  background: #ddd6c8;
+  border-radius: 8px;
+}
+
+.input {
+  @apply w-full rounded-xl border border-line bg-[#FCFBF7] px-3 py-2.5 text-sm text-ink placeholder-mute/60 outline-none transition focus:border-lilac focus:ring-2 focus:ring-lilac/20;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-up {
+  animation: fadeUp 0.35s ease both;
+}
+
+@keyframes dashFlow {
+  to {
+    background-position: 24px 0;
+  }
+}
+.flow-dash {
+  background-image: linear-gradient(90deg, #cfc7b8 40%, transparent 0);
+  background-size: 12px 2px;
+  background-repeat: repeat-x;
+}
+.flow-dash-active {
+  background-image: linear-gradient(90deg, #8b7be8 40%, transparent 0);
+  background-size: 12px 2px;
+  background-repeat: repeat-x;
+  animation: dashFlow 0.7s linear infinite;
+}
