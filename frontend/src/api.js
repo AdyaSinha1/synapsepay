@@ -1,4 +1,8 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+export const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  (typeof window !== "undefined" && window.location.hostname === "localhost"
+    ? "http://localhost:8000"
+    : "https://synapsepay-api.onrender.com");
 
 export async function api(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
