@@ -44,7 +44,17 @@ DRAFT -> FUNDED -> ACCEPTED -> SUBMITTED -> ARBITRATING -> SETTLED | PARTIAL | V
 `ARBITRATING` already exists as a status; with a DB it becomes durable, which closes the
 double-settle race properly (the current in-process asyncio lock only covers one worker).
 
-## 2. Containerized sandbox runner (current: Job Object / optional Docker)
+## 2. Money correctness (shipped Phase 2)
+
+Shipped: double-authorization fix (existing AUTHORIZED holds are reused; settled contracts
+reject new cycles); integer-minor-unit math in `app/money.py` (ROUND_HALF_UP, exact partial
+splits where captured + released == total, PayPal payload formatting); contract deadlines
+with `EXPIRED` state + 60s background sweep/reconcile loop; re-authorization endpoint with a
+26-day warning; reconciliation job flagging drift vs PayPal (`needs_review`); DRAFT → FUNDED
+funding endpoints; idempotency-key stability tests. Remaining: migrate `bounty_value` and
+metrics to cents end-to-end.
+
+## 2b. Containerized sandbox runner (current: Job Object / optional Docker)
 
 Already shipped: HMAC-verified results, argv scrubbing, Docker backend
 (`SANDBOX_BACKEND=docker`: `--network none`, memory/CPU/pids caps, read-only fs, non-root).
@@ -63,12 +73,12 @@ a lint signal, never the control.
 - Dispute round: either party can open one dispute per contract → re-arbitration with a
   second model + human arbitration queue for flagged receipts (`needs_review`).
 
-## 4. Real PayPal funding
+## 4. Real PayPal funding (backend shipped; UI in Phase 3)
 
-`AUTHORIZE` needs buyer approval: embed PayPal JS SDK Buttons on the contract page →
-`onApprove` returns the order id → server calls `authorize` → `FUNDED`. Add re-authorization
-before hold expiry and a daily reconciliation job (`GET /v2/payments/authorizations/{id}`)
-that flags drift between local state and PayPal state (complements the deadline sweep).
+`fund/start` creates the AUTHORIZE order; `fund/complete` authorizes after buyer approval.
+Remaining: embed PayPal JS SDK Buttons on the wizard's Fund step → `onApprove` posts
+`fund/complete`; simulated mode keeps the one-click button. Re-authorization and the
+reconciliation job shipped in Phase 2.
 
 ## 5. Operations
 
