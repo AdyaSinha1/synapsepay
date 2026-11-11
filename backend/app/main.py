@@ -5,7 +5,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -24,6 +24,7 @@ from .agent_simulator import (
     sweep_expired,
 )
 from .arbiter import evaluate_deliverable
+from .auth import require_user, router as auth_router
 from .db import init as db_init
 from .db import enabled as db_enabled
 from .models import (
@@ -78,6 +79,7 @@ app.add_middleware(
     allow_methods=config.CORS_METHODS,
     allow_headers=config.CORS_HEADERS,
 )
+app.include_router(auth_router)
 
 
 class RateLimitMiddleware:
@@ -236,7 +238,7 @@ async def metrics() -> dict:
 
 
 @app.post("/api/contracts/create")
-async def create_contract(req: ContractCreateRequest) -> dict:
+async def create_contract(req: ContractCreateRequest, _user=Depends(require_user)) -> dict:
     errors = _validate_create(req)
     if errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
@@ -290,7 +292,7 @@ async def create_contract(req: ContractCreateRequest) -> dict:
 
 
 @app.post("/api/contracts/execute-demo")
-async def execute_demo(req: ExecuteDemoRequest) -> dict:
+async def execute_demo(req: ExecuteDemoRequest, _user=Depends(require_user)) -> dict:
     try:
         if req.contract_id:
             contract = CONTRACTS.get(req.contract_id)
@@ -304,6 +306,8 @@ async def execute_demo(req: ExecuteDemoRequest) -> dict:
         return await run_full_cycle(scenario_id=req.scenario_id, broadcast=bus.broadcast)
     except PayPalError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/contracts")
@@ -342,7 +346,7 @@ async def contract_evaluations(contract_id: str) -> dict:
 
 
 @app.post("/api/contracts/{contract_id}/submit")
-async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest) -> dict:
+async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest, _user=Depends(require_user)) -> dict:
     contract = CONTRACTS.get(contract_id)
     if contract is None:
         raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
@@ -372,7 +376,7 @@ async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest) ->
 
 
 @app.post("/api/contracts/{contract_id}/arbitrate")
-async def arbitrate_contract(contract_id: str) -> dict:
+async def arbitrate_contract(contract_id: str, _user=Depends(require_user)) -> dict:
     contract = CONTRACTS.get(contract_id)
     if contract is None:
         raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
@@ -390,6 +394,8 @@ async def arbitrate_contract(contract_id: str) -> dict:
     evaluation, escrow, receipt, _events = await arbitrate_and_settle(
         contract, deliverable, escrow, bus.broadcast, allow_remediation_gate=True
     )
+    if evaluation is None:
+        raise HTTPException(status_code=409, detail="arbitration already in progress for this contract")
     return {
         "contract_id": contract_id,
         "evaluation": evaluation.model_dump(),
@@ -400,7 +406,7 @@ async def arbitrate_contract(contract_id: str) -> dict:
 
 
 @app.post("/api/maintenance/sweep")
-async def maintenance_sweep() -> dict:
+async def maintenance_sweep(_user=Depends(require_user)) -> dict:
     swept = await sweep_expired()
     return {"swept": swept, "count": len(swept)}
 

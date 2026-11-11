@@ -15,6 +15,7 @@ from .models import (
     deadline_from_hours,
 )
 from .paypal_client import PayPalClient, PayPalError
+from .state_machine import require_transition
 
 paypal = PayPalClient()
 
@@ -406,6 +407,8 @@ async def run_full_cycle(
     evaluation, escrow, receipt, arbiter_events = await arbitrate_and_settle(
         contract, deliverable, escrow, broadcast, allow_remediation_gate=False
     )
+    if evaluation is None:
+        raise ValueError("arbitration already in progress for this contract")
     for event in arbiter_events:
         events.append(event)
 
@@ -494,6 +497,17 @@ async def _arbitrate_locked(
         return event
 
     prev_status = escrow.status
+
+    if not db.claim_arbitration(contract.id):
+        await emit(
+            "arbitration_busy", "synapsepay",
+            f"Another arbitration is already running for contract {contract.id} — this call is a no-op",
+            level="warn",
+            data={"contract_id": contract.id},
+        )
+        return None, escrow, None, events
+
+    require_transition(prev_status, "ARBITRATING")
     escrow.status = "ARBITRATING"
     deadline_expired = _deadline_passed(contract)
 
@@ -550,6 +564,7 @@ async def _arbitrate_locked(
         and not deadline_expired
         and evaluation.composite >= config.REMEDIATION_FLOOR
     ):
+        require_transition("ARBITRATING", "REMEDIATION")
         escrow.status = "REMEDIATION"
         escrow.remediation_used = True
         db.save_escrow(escrow.model_dump())
@@ -789,6 +804,7 @@ async def _arbitrate_locked(
         escrow.status = prev_status
         escrow.last_error = "settlement incomplete — funds remain reserved; arbitration can be retried"
 
+    require_transition("ARBITRATING", escrow.status)
     db.save_escrow(escrow.model_dump())
     return evaluation, escrow, receipt, events
 
