@@ -46,6 +46,8 @@ export const fundComplete = (id, orderId) =>
   api(`/api/contracts/${id}/fund/complete`, { method: "POST", body: JSON.stringify({ order_id: orderId }) });
 export const acceptContract = (id, worker = "") =>
   api(`/api/contracts/${id}/accept`, { method: "POST", body: JSON.stringify({ worker }) });
+export const disputeContract = (id, reason) =>
+  api(`/api/contracts/${id}/dispute`, { method: "POST", body: JSON.stringify({ reason }) });
 export const submitDeliverable = (id, body) =>
   api(`/api/contracts/${id}/submit`, { method: "POST", body: JSON.stringify(body) });
 export const arbitrate = (id) => api(`/api/contracts/${id}/arbitrate`, { method: "POST" });

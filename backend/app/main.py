@@ -41,6 +41,8 @@ from .models import (
     AcceptRequest,
     ContractCreateRequest,
     Deliverable,
+    DisputeRequest,
+    DisputeResolveRequest,
     EscrowRecord,
     ExecuteDemoRequest,
     FundCompleteRequest,
@@ -210,6 +212,8 @@ async def root() -> dict:
 @app.get("/api/health")
 async def health() -> dict:
     """Deliberately minimal: no thresholds or weights for submission-tuning."""
+    from .arbiter import docker_available
+
     return {
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
@@ -218,6 +222,11 @@ async def health() -> dict:
         "gemini_mode": config.GEMINI_MODE,
         "active_contracts": len(CONTRACTS),
         "persistence": "sqlite" if db_enabled() else "memory",
+        "sandbox": {
+            "backend": "docker" if docker_available() else "native",
+            "docker_available": docker_available(),
+            "note": "containers are the security boundary; the AST policy scan is a lint",
+        },
     }
 
 
@@ -422,7 +431,17 @@ async def arbitrate_contract(contract_id: str, _user=Depends(require_user)) -> d
             raise HTTPException(status_code=409, detail="arbitration already in progress for this contract")
         raise HTTPException(status_code=409, detail="contract escrow is not active (already settled or missing)")
     if contract.state not in ("FUNDED", "ACCEPTED", "SUBMITTED"):
+        if contract.state == "DISPUTED":
+            raise HTTPException(status_code=409, detail="contract is in dispute — arbitration frozen pending review")
         raise HTTPException(status_code=409, detail=f"contract state is {contract.state}, not arbitratable")
+
+    from .terms import terms_hash_of
+
+    if contract.terms_hash and terms_hash_of(contract) != contract.terms_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="arbitration terms are locked: tests, criteria or weights changed after funding",
+        )
     deliverable = DELIVERABLES.get(contract_id)
     if deliverable is None:
         raise HTTPException(status_code=409, detail="no deliverable submitted yet for this contract")
@@ -609,6 +628,83 @@ async def accept_contract(contract_id: str, req: AcceptRequest, user=Depends(req
         "worker": contract.worker,
         "next": f"POST /api/contracts/{contract_id}/submit",
     }
+
+
+@app.post("/api/contracts/{contract_id}/dispute")
+async def dispute_contract(contract_id: str, req: DisputeRequest, _user=Depends(require_user)) -> dict:
+    contract = CONTRACTS.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    escrow = ESCROWS.get(contract_id)
+    if escrow is None or escrow.status not in ("AUTHORIZED", "REMEDIATION"):
+        raise HTTPException(status_code=409, detail="disputes require an active escrow")
+    if contract.state not in ("FUNDED", "ACCEPTED", "SUBMITTED"):
+        raise HTTPException(status_code=409, detail=f"contract state is {contract.state}, cannot dispute")
+
+    from .state_machine import require_transition
+
+    require_transition(contract.state, "DISPUTED")
+    contract.state = "DISPUTED"
+    contract.dispute_reason = (req.reason or "no reason given")[:300]
+
+    from . import db
+
+    db.save_contract(contract.model_dump())
+    from .agent_simulator import _register_event
+    from .models import EventLogEntry
+
+    _register_event(EventLogEntry(
+        stage="dispute_opened", actor="protocol",
+        message=f"Dispute opened on {contract_id}: {contract.dispute_reason} — arbitration frozen pending review",
+        level="warn", data={"contract_id": contract_id, "reason": contract.dispute_reason},
+    ))
+    return {
+        "contract_id": contract_id,
+        "state": "DISPUTED",
+        "note": "Arbitration is frozen. An operator resolves via /api/maintenance/disputes/{id}/resolve "
+                "(proceed re-enables arbitration; void releases the hold).",
+    }
+
+
+@app.post("/api/maintenance/disputes/{contract_id}/resolve")
+async def resolve_dispute(contract_id: str, req: DisputeResolveRequest, _user=Depends(require_user)) -> dict:
+    import hmac as hmac_mod
+
+    if config.ADMIN_TOKEN and not hmac_mod.compare_digest(req.admin_token, config.ADMIN_TOKEN):
+        raise HTTPException(status_code=403, detail="admin token required")
+    contract = CONTRACTS.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    escrow = ESCROWS.get(contract_id)
+    if escrow is None or contract.state != "DISPUTED":
+        raise HTTPException(status_code=409, detail="contract is not in DISPUTED state")
+
+    from .state_machine import require_transition
+
+    if req.outcome == "proceed":
+        require_transition("DISPUTED", "SUBMITTED")
+        contract.state = "SUBMITTED"
+        from . import db
+
+        db.save_contract(contract.model_dump())
+        return {"contract_id": contract_id, "state": "SUBMITTED", "note": "dispute resolved — arbitration re-enabled"}
+
+    require_transition("DISPUTED", "VOIDED")
+    try:
+        await paypal.void_authorization(escrow.authorization_id)
+    except PayPalError as exc:
+        if exc.kind == "already_captured":
+            raise HTTPException(status_code=409, detail="authorization already captured — manual reconciliation required") from exc
+        if exc.kind not in ("expired", "voided"):
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    escrow.status = "VOIDED"
+    escrow.settled_at = datetime.now(timezone.utc).isoformat()
+    from . import db
+
+    db.save_escrow(escrow.model_dump())
+    contract.state = "VOIDED"
+    db.save_contract(contract.model_dump())
+    return {"contract_id": contract_id, "state": "VOIDED", "note": "dispute resolved — hold released to the hirer"}
 
 
 @app.post("/api/maintenance/sweep")

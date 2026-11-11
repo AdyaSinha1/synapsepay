@@ -4,7 +4,7 @@ import { ArrowLeft, Bot, FileSignature, Landmark, Loader2, ShieldCheck } from "l
 import EventFeed from "../components/EventFeed.jsx";
 import { Chip, EmptyState, PageIntro, ScoreBar, SectionHeader, StatusChip } from "../components/ui.jsx";
 import { useApp } from "../context.jsx";
-import { fmtUSD, getContract, getContractEvaluations, getContractSubmissions } from "../api.js";
+import { disputeContract, fmtUSD, getContract, getContractEvaluations, getContractSubmissions } from "../api.js";
 
 const STATE_STEPS = [
   { state: "FUNDED", label: "Funded", icon: Landmark },
@@ -30,6 +30,8 @@ export default function ContractDetail() {
   const [evaluations, setEvaluations] = useState([]);
   const [submissions, setSubmissions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [disputeReason, setDisputeReason] = useState("");
+  const [disputeBusy, setDisputeBusy] = useState(false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -166,6 +168,40 @@ export default function ContractDetail() {
                 <p className="font-semibold text-ink">{esc?.mode === "live_sandbox" ? "Live sandbox" : "Simulated"}</p>
               </div>
             </div>
+            {["FUNDED", "ACCEPTED", "SUBMITTED"].includes(state) && (
+              <div className="mt-4 border-t border-line pt-3">
+                <p className="text-[11px] font-semibold text-ink">Dispute this contract</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-mute">
+                  Freezes arbitration pending a human/second-model review. Available to either party before capture.
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    className="input !py-1.5 text-xs"
+                    placeholder="Reason (optional)"
+                    value={disputeReason}
+                    onChange={(e) => setDisputeReason(e.target.value)}
+                  />
+                  <button
+                    className="btn-ghost shrink-0 !px-3 !py-1.5 text-xs text-coral"
+                    onClick={async () => {
+                      setDisputeBusy(true);
+                      try {
+                        await disputeContract(id, disputeReason);
+                        await load();
+                        setDisputeReason("");
+                      } catch (e) {
+                        showError(e);
+                      } finally {
+                        setDisputeBusy(false);
+                      }
+                    }}
+                    disabled={disputeBusy}
+                  >
+                    {disputeBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Open dispute"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {receipt && (

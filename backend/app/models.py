@@ -31,6 +31,8 @@ class TaskContract(BaseModel):
     test_code: str = ""
     worker_code: str = ""
     state: str = Field(default="FUNDED")
+    terms_hash: str = ""
+    dispute_reason: str = ""
     arbiter_weights: dict = Field(
         default_factory=lambda: {"tests": 0.50, "schema": 0.25, "llm": 0.25}
     )
@@ -143,6 +145,15 @@ class SandboxPreviewRequest(BaseModel):
 
 class AcceptRequest(BaseModel):
     worker: str = ""
+
+
+class DisputeRequest(BaseModel):
+    reason: str = ""
+
+
+class DisputeResolveRequest(BaseModel):
+    outcome: Literal["proceed", "void"]
+    admin_token: str = ""
 
 
 class SubmitDeliverableRequest(BaseModel):

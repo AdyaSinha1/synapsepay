@@ -17,6 +17,7 @@ from .models import (
 )
 from .paypal_client import PayPalClient, PayPalError
 from .state_machine import require_transition
+from .terms import lock_contract_terms
 
 paypal = PayPalClient()
 
@@ -398,6 +399,7 @@ async def run_full_cycle(
         )
         ESCROWS[contract.id] = escrow
         db.save_escrow(escrow.model_dump())
+        lock_contract_terms(contract)
 
         await emit(
             "paypal_authorized", "paypal-vault",

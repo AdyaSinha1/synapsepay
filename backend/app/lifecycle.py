@@ -24,7 +24,12 @@ from .models import EscrowRecord, TaskContract
 REAUTHORIZE_AFTER_DAYS = 26
 
 
-def reauthorization_recommended(escrow: EscrowRecord | None) -> bool:
+from .terms import lock_contract_terms, terms_hash_of  # noqa: F401
+
+REAUTHORIZE_AFTER_DAYS = 26
+
+
+def reauthorization_recommended(escrow) -> bool:
     """PayPal authorizations expire after ~29 days; honored holds are often
     shorter. Recommend a fresh hold shortly before that window closes."""
     if escrow is None or escrow.status != "AUTHORIZED":
@@ -36,7 +41,6 @@ def reauthorization_recommended(escrow: EscrowRecord | None) -> bool:
     if authorized.tzinfo is None:
         authorized = authorized.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) - authorized > timedelta(days=REAUTHORIZE_AFTER_DAYS)
-
 
 async def reconcile_escrows() -> list[dict]:
     """Compare local escrow state with PayPal's authorization state and flag
@@ -152,6 +156,7 @@ async def complete_funding(contract: TaskContract, order_id: str) -> EscrowRecor
         raise ValueError("order_id does not match the pending funding order")
     auth = await paypal.authorize_order(order_id)
     require_transition("DRAFT", "FUNDED")
+    lock_contract_terms(contract)
     escrow.authorization_id = auth["authorization_id"]
     escrow.status = "AUTHORIZED"
     escrow.authorized_at = _now()
