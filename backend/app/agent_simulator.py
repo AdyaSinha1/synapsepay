@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import config
+from . import db
 from .arbiter import evaluate_deliverable
 from .models import (
     Deliverable,
@@ -306,10 +307,17 @@ def _register_event(event: EventLogEntry) -> None:
     EVENT_LOG.append(event.model_dump())
     if len(EVENT_LOG) > MAX_LOG:
         del EVENT_LOG[: len(EVENT_LOG) - MAX_LOG]
+    db.append_event(event.data.get("contract_id"), event.model_dump())
 
 
 def _record_evaluation(contract_id: str, evaluation) -> None:
     EVALUATIONS.setdefault(contract_id, []).append(evaluation.model_dump())
+    db.append_evaluation(contract_id, evaluation.model_dump())
+
+
+def _record_run(entry: dict) -> None:
+    RUNS.append(entry)
+    db.append_run(entry)
 
 
 async def run_full_cycle(
@@ -340,6 +348,7 @@ async def run_full_cycle(
             raise ValueError(f"unknown scenario: {scenario_id}")
         contract = build_contract_from_scenario(scenario_id)
     CONTRACTS[contract.id] = contract
+    db.save_contract(contract.model_dump())
 
     await emit(
         "contract_formulated", contract.hirer,
@@ -366,6 +375,7 @@ async def run_full_cycle(
         mode=order["mode"],
     )
     ESCROWS[contract.id] = escrow
+    db.save_escrow(escrow.model_dump())
 
     await emit(
         "paypal_authorized", "paypal-vault",
@@ -381,6 +391,7 @@ async def run_full_cycle(
     await asyncio.sleep(0.55)
     deliverable = build_deliverable(contract)
     DELIVERABLES[contract.id] = deliverable
+    db.save_deliverable(contract.id, deliverable.model_dump())
     await emit(
         "worker_delivered", contract.worker,
         f"Deliverable artifact submitted ({deliverable.artifact_type}, "
@@ -541,6 +552,7 @@ async def _arbitrate_locked(
     ):
         escrow.status = "REMEDIATION"
         escrow.remediation_used = True
+        db.save_escrow(escrow.model_dump())
         await emit(
             "remediation_opened", "synapsepay",
             f"Score {evaluation.composite:.4f} is close to the threshold — remediation round opened. "
@@ -609,7 +621,7 @@ async def _arbitrate_locked(
             )
             await emit("paypal_settlement", "paypal-vault", message, level=level,
                        data={"receipt": receipt.model_dump(), "capture_id": cap["capture_id"]})
-            RUNS.append({
+            _record_run({
                 "contract_id": contract.id, "title": contract.title,
                 "amount": escrow.amount, "currency": escrow.currency,
                 "decision": decision, "composite": evaluation.composite,
@@ -637,7 +649,7 @@ async def _arbitrate_locked(
                 f"Capture not possible: {outcome['message']} — funds released to hirer",
                 level="error", data={"receipt": receipt.model_dump(), "kind": outcome["kind"]},
             )
-            RUNS.append({
+            _record_run({
                 "contract_id": contract.id, "title": contract.title,
                 "amount": escrow.amount, "currency": escrow.currency,
                 "decision": "VOID", "composite": evaluation.composite,
@@ -683,7 +695,7 @@ async def _arbitrate_locked(
                 level="warn",
                 data={"receipt": receipt.model_dump(), "status": "VOIDED"},
             )
-            RUNS.append({
+            _record_run({
                 "contract_id": contract.id, "title": contract.title,
                 "amount": escrow.amount, "currency": escrow.currency,
                 "decision": "VOID", "composite": evaluation.composite,
@@ -719,7 +731,7 @@ async def _arbitrate_locked(
                     f"verdict/settlement conflict flagged for human review (no metrics credit)",
                     level="error", data={"receipt": receipt.model_dump(), "kind": exc.kind},
                 )
-                RUNS.append({
+                _record_run({
                     "contract_id": contract.id, "title": contract.title,
                     "amount": escrow.amount, "currency": escrow.currency,
                     "decision": "NEEDS_REVIEW", "composite": evaluation.composite,
@@ -747,7 +759,7 @@ async def _arbitrate_locked(
                     f"Authorization already {escrow.status.lower()} — reservation already released",
                     level="warn", data={"receipt": receipt.model_dump(), "kind": exc.kind},
                 )
-                RUNS.append({
+                _record_run({
                     "contract_id": contract.id, "title": contract.title,
                     "amount": escrow.amount, "currency": escrow.currency,
                     "decision": "VOID", "composite": evaluation.composite,
@@ -777,6 +789,7 @@ async def _arbitrate_locked(
         escrow.status = prev_status
         escrow.last_error = "settlement incomplete — funds remain reserved; arbitration can be retried"
 
+    db.save_escrow(escrow.model_dump())
     return evaluation, escrow, receipt, events
 
 
@@ -795,6 +808,7 @@ async def sweep_expired() -> list[dict]:
             if exc.kind == "already_captured":
                 escrow.status = "CAPTURED"
                 escrow.last_error = "deadline sweep found this authorization already captured — flagged for review"
+                db.save_escrow(escrow.model_dump())
                 _register_event(EventLogEntry(
                     stage="flagged_for_review", actor="synapsepay",
                     message=f"Deadline sweep: {cid} already captured — conflict flagged for review",
@@ -802,6 +816,7 @@ async def sweep_expired() -> list[dict]:
                 ))
                 continue
             escrow.last_error = f"deadline sweep void failed: {exc}"
+            db.save_escrow(escrow.model_dump())
             _register_event(EventLogEntry(
                 stage="paypal_settlement_failed", actor="paypal-vault",
                 message=f"Deadline sweep void failed for {cid}: {exc}",
@@ -826,7 +841,8 @@ async def sweep_expired() -> list[dict]:
                   "holds are often shorter, so funded contracts carry explicit deadlines.",
         )
         escrow.receipt = receipt
-        RUNS.append({
+        db.save_escrow(escrow.model_dump())
+        _record_run({
             "contract_id": cid, "title": contract.title,
             "amount": escrow.amount, "currency": escrow.currency,
             "decision": "VOID", "composite": 0.0,
@@ -841,6 +857,54 @@ async def sweep_expired() -> list[dict]:
         ))
         swept.append({"contract_id": cid, "amount": escrow.amount})
     return swept
+
+
+def restore_from_disk() -> dict:
+    """Rehydrate stores from SQLite at startup and recover interrupted work.
+
+    Escrows stuck in ARBITRATING (e.g. a crash mid-evaluation) return to
+    AUTHORIZED with a last_error note; expired deadlines are then handled by
+    the sweep. Returns a summary for the health/config surfaces.
+    """
+    if not db.enabled():
+        return {"restored": False, "reason": "persistence disabled"}
+    data = db.load_all()
+    for c in data.get("contracts", []):
+        try:
+            obj = TaskContract.model_validate(c)
+            CONTRACTS[obj.id] = obj
+        except Exception:
+            continue
+    for e in data.get("escrows", []):
+        try:
+            obj = EscrowRecord.model_validate(e)
+        except Exception:
+            continue
+        if obj.status == "ARBITRATING":
+            obj.status = "AUTHORIZED"
+            obj.last_error = "recovered after restart — arbitration had not completed; safe to re-run"
+            db.save_escrow(obj.model_dump())
+        ESCROWS[obj.contract_id] = obj
+    for cid, d in data.get("deliverables", []):
+        try:
+            DELIVERABLES[cid] = Deliverable.model_validate(d)
+        except Exception:
+            continue
+    for cid, e in data.get("evaluations", []):
+        EVALUATIONS.setdefault(cid, []).append(e)
+    for r in data.get("runs", []):
+        RUNS.append(r)
+    for e in data.get("events", []):
+        EVENT_LOG.append(e)
+    return {
+        "restored": True,
+        "contracts": len(CONTRACTS),
+        "escrows": len(ESCROWS),
+        "deliverables": len(DELIVERABLES),
+        "evaluation_rounds": sum(len(v) for v in EVALUATIONS.values()),
+        "runs": len(RUNS),
+        "events": len(EVENT_LOG),
+    }
 
 
 def compute_metrics() -> dict:

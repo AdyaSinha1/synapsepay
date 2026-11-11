@@ -470,3 +470,91 @@ def test_submit_blocked_while_arbitrating():
     resp = client.post(f"/api/contracts/{contract.id}/submit", json={"artifact_type": "code", "code": "x = 1\n"})
     assert resp.status_code == 409
     assert "arbitration" in resp.json()["detail"]
+
+
+def test_sqlite_persistence_roundtrip(tmp_path):
+    from app import agent_simulator as sim
+    from app import db
+
+    dbpath = tmp_path / "persistence.db"
+    assert db.init(str(dbpath)) is True
+    try:
+        contract = build_contract_from_scenario("A")
+        escrow = _fresh_escrow(contract, 75.0)
+        escrow.status = "CAPTURED"
+        sim.CONTRACTS[contract.id] = contract
+        sim.ESCROWS[contract.id] = escrow
+        db.save_contract(contract.model_dump())
+        db.save_escrow(escrow.model_dump())
+
+        sim.CONTRACTS.pop(contract.id, None)
+        sim.ESCROWS.pop(contract.id, None)
+        db.close()
+        assert db.init(str(dbpath)) is True
+        summary = sim.restore_from_disk()
+        assert summary["restored"] is True
+        assert contract.id in sim.CONTRACTS
+        assert sim.ESCROWS[contract.id].status == "CAPTURED"
+    finally:
+        db.close()
+
+
+def test_arbitrating_recovers_to_authorized_on_restore(tmp_path):
+    from app import agent_simulator as sim
+    from app import db
+
+    dbpath = tmp_path / "recovery.db"
+    assert db.init(str(dbpath)) is True
+    try:
+        contract = build_contract_from_scenario("C")
+        escrow = _fresh_escrow(contract, 30.0)
+        escrow.status = "ARBITRATING"
+        sim.CONTRACTS[contract.id] = contract
+        sim.ESCROWS[contract.id] = escrow
+        db.save_contract(contract.model_dump())
+        db.save_escrow(escrow.model_dump())
+
+        sim.CONTRACTS.pop(contract.id, None)
+        sim.ESCROWS.pop(contract.id, None)
+        db.close()
+        assert db.init(str(dbpath)) is True
+        sim.restore_from_disk()
+        recovered = sim.ESCROWS[contract.id]
+        assert recovered.status == "AUTHORIZED"
+        assert recovered.last_error is not None
+        assert "recovered" in recovered.last_error
+    finally:
+        db.close()
+
+
+def test_evaluations_events_and_runs_persist(tmp_path):
+    from app import agent_simulator as sim
+    from app import db
+
+    dbpath = tmp_path / "audit.db"
+    assert db.init(str(dbpath)) is True
+    try:
+        contract = build_contract_from_scenario("A")
+        escrow = _fresh_escrow(contract, 75.0)
+        sim.CONTRACTS[contract.id] = contract
+        sim.ESCROWS[contract.id] = escrow
+        db.save_contract(contract.model_dump())
+        db.save_escrow(escrow.model_dump())
+        evaluation, settled, receipt, _ = _run(
+            arbitrate_and_settle(contract, build_deliverable(contract), escrow)
+        )
+        assert receipt is not None
+
+        sim.CONTRACTS.pop(contract.id, None)
+        sim.ESCROWS.pop(contract.id, None)
+        sim.EVALUATIONS.pop(contract.id, None)
+        db.close()
+        assert db.init(str(dbpath)) is True
+        sim.restore_from_disk()
+
+        assert contract.id in sim.EVALUATIONS
+        assert sim.EVALUATIONS[contract.id][-1]["decision"] == "CAPTURE"
+        assert any(r["contract_id"] == contract.id for r in sim.RUNS)
+        assert any(e.get("stage") == "paypal_settlement" for e in sim.EVENT_LOG)
+    finally:
+        db.close()

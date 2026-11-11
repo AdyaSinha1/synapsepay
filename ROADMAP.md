@@ -3,10 +3,16 @@
 The MVP is intentionally honest about what it is not. This file is the ordered plan to close
 the gaps identified in the security/design review, with the target architecture for each step.
 
-## 1. Auth, database, contract state machine (next)
+## 1. Auth, database, contract state machine (in progress)
 
-**Auth.** Sessions via Supabase/Clerk/Auth0 (JWT). Two roles per contract, enforced
-server-side on every route:
+**✅ Shipped (this step):** durable **SQLite** write-through persistence
+(`backend/app/db.py`) for contracts, escrows, deliverables, evaluations, settlement
+records and the event ledger; startup rehydration; `ARBITRATING` crash recovery; deadline
+sweep on boot. Enable/disable with `PERSISTENCE_ENABLED`, relocate with `DATABASE_PATH`.
+
+**Next:** swap SQLite for **Postgres** (multi-instance safe) and add **auth** — sessions
+via Supabase/Clerk/Auth0 (JWT) or first-party bearer tokens, with two roles per contract
+enforced server-side on every route:
 
 - `hirer` — creates contracts, funds escrow, sees receipts
 - `worker` — browses open contracts, accepts, submits deliverables
@@ -15,8 +21,8 @@ server-side on every route:
 `Depends(current_user)` plus an ownership check (`contract.hirer_id == user.id` for
 fund/arbitrate, `contract.worker_id == user.id` for submit).
 
-**Database.** Replace the in-memory dicts in `agent_simulator.py` (CONTRACTS, ESCROWS,
-DELIVERABLES, EVALUATIONS, RUNS) with Postgres:
+**Database (target).** The SQLite layer already persists the same payloads; Postgres
+replaces it for multi-instance deployments with a stricter schema:
 
 ```
 contracts(id, hirer_id, worker_id, title, spec, criteria, test_code, test_code_hash,

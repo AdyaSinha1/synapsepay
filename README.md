@@ -92,6 +92,12 @@ Every claim below maps to code and tests:
   `NEEDS_REVIEW` decision, excluded from success metrics) instead of silently paying
   against a VOID verdict; contracts carry **deadlines** and a sweep auto-voids expired
   reservations (PayPal holds expire ~29 days; honored holds are often shorter).
+- **Durable storage** — every mutation (contracts, escrows, deliverables, evaluation
+  rounds, settlement records, the event ledger) is written through to SQLite
+  (`app/db.py`), and startup **rehydrates** the stores: contracts survive process
+  restarts and hosting sleeps, interrupted arbitrations recover from `ARBITRATING` back
+  to `AUTHORIZED`, and expired deadlines are swept on boot. Postgres (multi-instance)
+  remains the roadmap step — SQLite is single-writer and ephemeral across redeploys.
 - **Abuse controls** — sliding-window rate limits (general + tighter arbitration bucket),
   payload-size caps, bounty/currency whitelists, a deliberately minimal `/api/health`
   (thresholds/weights moved to a token-gated `/api/config`), and restricted CORS
@@ -265,8 +271,10 @@ locking**, and **input validation** (title/bounty/currency/code-size/minimum-tes
 - There is **no authentication yet**: contracts, submissions, and arbitration are open to
   anyone with the URL, the WebSocket broadcasts all events to any connected client, and the
   rate limiter is per-process. Fine for a demo, not for real money (`ROADMAP.md` §1).
-- Contracts live **in memory**: a restart or hosting sleep clears them, and the operator
-  runs the arbiter — trust-minimized, not trustless.
+- **Persistence is single-writer SQLite**: data now survives restarts and sleeps, but a
+  hosting **redeploy** recreates the instance and starts from an empty database, and the
+  setup is not multi-instance safe — Postgres + auth is the next step (`ROADMAP.md` §1).
+  The operator runs the arbiter — trust-minimized, not trustless.
 
 ## Roadmap
 

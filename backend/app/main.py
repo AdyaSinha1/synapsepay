@@ -2,6 +2,7 @@ import json
 import re
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -17,11 +18,14 @@ from .agent_simulator import (
     SCENARIOS,
     compute_metrics,
     paypal,
+    restore_from_disk,
     run_full_cycle,
     scenario_summary,
     sweep_expired,
 )
 from .arbiter import evaluate_deliverable
+from .db import init as db_init
+from .db import enabled as db_enabled
 from .models import (
     ContractCreateRequest,
     Deliverable,
@@ -37,6 +41,23 @@ app_kwargs = {}
 if not config.DOCS_ENABLED:
     app_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
+
+@asynccontextmanager
+async def lifespan(_app):
+    db_init(config.DATABASE_PATH)
+    restore = restore_from_disk()
+    swept = await sweep_expired()
+    if swept or restore.get("restored"):
+        print(
+            f"[synapsepay] startup: persistence={'on' if db_enabled() else 'off'}, "
+            f"restored={restore}, deadline-swept={len(swept)}"
+        )
+    yield
+    from . import db
+
+    db.close()
+
+
 app = FastAPI(
     title="SynapsePay",
     description=(
@@ -46,6 +67,7 @@ app = FastAPI(
         "Operator-run arbiter; not permissionless."
     ),
     version=config.APP_VERSION,
+    lifespan=lifespan,
     **app_kwargs,
 )
 
@@ -164,6 +186,7 @@ async def health() -> dict:
         "paypal_mode": paypal.mode,
         "gemini_mode": config.GEMINI_MODE,
         "active_contracts": len(CONTRACTS),
+        "persistence": "sqlite" if db_enabled() else "memory",
     }
 
 
@@ -192,6 +215,11 @@ async def admin_config(token: str = "") -> dict:
         "rate_limits": {
             "general_per_minute": config.RATE_LIMIT_PER_MINUTE,
             "arbitrate_per_minute": config.RATE_LIMIT_ARBITRATE_PER_MINUTE,
+        },
+        "persistence": {
+            "backend": "sqlite" if db_enabled() else "memory",
+            "path": config.DATABASE_PATH,
+            "note": "SQLite survives restarts and hosting sleeps; Postgres is the roadmap step for multi-instance.",
         },
         "active_contracts": len(CONTRACTS),
     }
@@ -247,6 +275,11 @@ async def create_contract(req: ContractCreateRequest) -> dict:
     )
     CONTRACTS[contract.id] = contract
     ESCROWS[contract.id] = escrow
+
+    from . import db
+
+    db.save_contract(contract.model_dump())
+    db.save_escrow(escrow.model_dump())
     return {
         "contract": contract.model_dump(),
         "escrow": escrow.model_dump(),
@@ -326,6 +359,10 @@ async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest) ->
         notes=(req.notes or "Submitted via agent REST API")[:500],
     )
     DELIVERABLES[contract_id] = deliverable
+
+    from . import db
+
+    db.save_deliverable(contract_id, deliverable.model_dump())
     return {
         "contract_id": contract_id,
         "deliverable": deliverable.model_dump(),

@@ -49,6 +49,9 @@ RATE_LIMIT_ARBITRATE_PER_MINUTE = _env_int("RATE_LIMIT_ARBITRATE_PER_MINUTE", 12
 DOCS_ENABLED = os.getenv("DOCS_ENABLED", "true").lower() in ("1", "true", "yes")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
+PERSISTENCE_ENABLED = os.getenv("PERSISTENCE_ENABLED", "true").lower() in ("1", "true", "yes")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "synapsepay.db")
+
 W_TESTS = _env_float("W_TESTS", 0.50)
 W_SCHEMA = _env_float("W_SCHEMA", 0.25)
 W_LLM = _env_float("W_LLM", 0.25)
