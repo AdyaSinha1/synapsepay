@@ -136,6 +136,15 @@ class FundCompleteRequest(BaseModel):
     order_id: str
 
 
+class SandboxPreviewRequest(BaseModel):
+    code: str
+    tests: str
+
+
+class AcceptRequest(BaseModel):
+    worker: str = ""
+
+
 class SubmitDeliverableRequest(BaseModel):
     artifact_type: Literal["code", "json", "svg"] = "code"
     code: str = ""

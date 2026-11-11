@@ -26,7 +26,7 @@ from .agent_simulator import (
     scenario_summary,
     sweep_expired,
 )
-from .arbiter import evaluate_deliverable
+from .arbiter import evaluate_deliverable, run_code_sandbox
 from .auth import require_user, router as auth_router
 from .db import init as db_init
 from .db import enabled as db_enabled
@@ -38,11 +38,13 @@ from .lifecycle import (
     start_funding,
 )
 from .models import (
+    AcceptRequest,
     ContractCreateRequest,
     Deliverable,
     EscrowRecord,
     ExecuteDemoRequest,
     FundCompleteRequest,
+    SandboxPreviewRequest,
     SubmitDeliverableRequest,
     TaskContract,
     deadline_from_hours,
@@ -395,6 +397,12 @@ async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest, _u
     from . import db
 
     db.save_deliverable(contract_id, deliverable.model_dump())
+    if contract.state in ("FUNDED", "ACCEPTED"):
+        from .state_machine import require_transition
+
+        require_transition(contract.state, "SUBMITTED")
+        contract.state = "SUBMITTED"
+        db.save_contract(contract.model_dump())
     return {
         "contract_id": contract_id,
         "deliverable": deliverable.model_dump(),
@@ -413,6 +421,8 @@ async def arbitrate_contract(contract_id: str, _user=Depends(require_user)) -> d
         if escrow is not None and escrow.status == "ARBITRATING":
             raise HTTPException(status_code=409, detail="arbitration already in progress for this contract")
         raise HTTPException(status_code=409, detail="contract escrow is not active (already settled or missing)")
+    if contract.state not in ("FUNDED", "ACCEPTED", "SUBMITTED"):
+        raise HTTPException(status_code=409, detail=f"contract state is {contract.state}, not arbitratable")
     deliverable = DELIVERABLES.get(contract_id)
     if deliverable is None:
         raise HTTPException(status_code=409, detail="no deliverable submitted yet for this contract")
@@ -528,6 +538,77 @@ async def reauthorize_contract(contract_id: str, _user=Depends(require_user)) ->
 async def maintenance_reconcile(_user=Depends(require_user)) -> dict:
     findings = await reconcile_escrows()
     return {"findings": findings, "count": len(findings)}
+
+
+@app.post("/api/sandbox/preview")
+async def sandbox_preview(req: SandboxPreviewRequest, _user=Depends(require_user)) -> dict:
+    """Wizard helper: run a hirer's draft tests against their own sample code."""
+    if len(req.code or "") > config.MAX_CODE_CHARS or len(req.tests or "") > config.MAX_CODE_CHARS:
+        raise HTTPException(status_code=422, detail=f"code and tests are limited to {config.MAX_CODE_CHARS} characters")
+    result = await asyncio.to_thread(
+        run_code_sandbox, req.code, req.tests, config.SANDBOX_TIMEOUT_SECONDS
+    )
+    return result
+
+
+@app.get("/api/events/recent")
+async def recent_events(limit: int = 40) -> dict:
+    capped = max(1, min(int(limit), 200))
+    return {"events": list(reversed(EVENT_LOG[-capped:]))}
+
+
+@app.get("/api/paypal/config")
+async def paypal_config() -> dict:
+    return {
+        "mode": paypal.mode,
+        "client_id": config.PAYPAL_CLIENT_ID if paypal.mode == "live_sandbox" else "",
+        "currency": "USD",
+        "intent": "AUTHORIZE",
+    }
+
+
+@app.get("/api/contracts/{contract_id}/submissions")
+async def contract_submissions(contract_id: str) -> dict:
+    if contract_id not in CONTRACTS:
+        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    submissions = []
+    from . import db
+
+    if db.enabled():
+        data = db.load_all()
+        submissions = [d for cid, d in data["deliverables"] if cid == contract_id]
+    elif contract_id in DELIVERABLES:
+        submissions = [DELIVERABLES[contract_id].model_dump()]
+    return {"contract_id": contract_id, "submissions": submissions, "count": len(submissions)}
+
+
+@app.post("/api/contracts/{contract_id}/accept")
+async def accept_contract(contract_id: str, req: AcceptRequest, user=Depends(require_user)) -> dict:
+    contract = CONTRACTS.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    escrow = ESCROWS.get(contract_id)
+    if escrow is None or escrow.status != "AUTHORIZED":
+        raise HTTPException(status_code=409, detail="only contracts with an active escrow can be accepted")
+    if contract.state != "FUNDED":
+        raise HTTPException(status_code=409, detail=f"contract state is {contract.state}, not FUNDED")
+
+    from .state_machine import require_transition
+
+    require_transition("FUNDED", "ACCEPTED")
+    contract.state = "ACCEPTED"
+    worker_name = req.worker.strip() or (user.username if user is not None else "worker-agent-b")
+    contract.worker = worker_name[:64]
+
+    from . import db
+
+    db.save_contract(contract.model_dump())
+    return {
+        "contract_id": contract_id,
+        "contract": contract.model_dump(),
+        "worker": contract.worker,
+        "next": f"POST /api/contracts/{contract_id}/submit",
+    }
 
 
 @app.post("/api/maintenance/sweep")

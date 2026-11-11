@@ -176,4 +176,37 @@ def logout(req: LogoutRequest, authorization: str | None = Header(default=None),
         if row is not None:
             session.delete(row)
             session.commit()
-    return {"status": "LOGGED_OUT", "note": "this token can no longer authenticate; logout-everywhere lands with settings"}
+    return {"status": "LOGGED_OUT", "note": "this token can no longer authenticate"}
+
+
+class PasswordChangeRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@router.post("/password")
+def change_password(req: PasswordChangeRequest, authorization: str | None = Header(default=None), session: Session = Depends(get_db)) -> dict:
+    token = _bearer_token(authorization)
+    user = authenticate_token(token or "", session)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid or expired session token")
+    if not _verify_password(req.old_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="old password is incorrect")
+    if len(req.new_password) < MIN_PASSWORD_LEN:
+        raise HTTPException(status_code=422, detail=f"password must be at least {MIN_PASSWORD_LEN} characters")
+    user.password_hash = _hash_password(req.new_password)
+    session.commit()
+    return {"status": "PASSWORD_UPDATED"}
+
+
+@router.post("/logout-all")
+def logout_everywhere(authorization: str | None = Header(default=None), session: Session = Depends(get_db)) -> dict:
+    token = _bearer_token(authorization)
+    user = authenticate_token(token or "", session)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid or expired session token")
+    rows = session.scalars(select(SessionRow).where(SessionRow.user_id == user.id)).all()
+    for row in rows:
+        session.delete(row)
+    session.commit()
+    return {"status": "LOGGED_OUT_EVERYWHERE", "sessions_removed": len(rows)}
