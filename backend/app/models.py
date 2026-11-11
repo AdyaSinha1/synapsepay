@@ -30,6 +30,7 @@ class TaskContract(BaseModel):
     deliverable_schema: dict = Field(default_factory=dict)
     test_code: str = ""
     worker_code: str = ""
+    state: str = Field(default="FUNDED")
     arbiter_weights: dict = Field(
         default_factory=lambda: {"tests": 0.50, "schema": 0.25, "llm": 0.25}
     )
@@ -66,8 +67,11 @@ class SettlementReceipt(BaseModel):
     authorization_id: str
     amount: float
     currency: str = "USD"
+    amount_cents: int = 0
     captured_amount: Optional[float] = None
     released_amount: Optional[float] = None
+    captured_cents: int = 0
+    released_cents: int = 0
     mode: str = "simulated"
     timestamp: str = Field(default_factory=_now)
     paypal_dashboard_url: str = "https://developer.paypal.com/dashboard/"
@@ -81,7 +85,8 @@ class EscrowRecord(BaseModel):
     authorization_id: str
     amount: float
     currency: str = "USD"
-    status: Literal["AUTHORIZED", "ARBITRATING", "PARTIAL", "CAPTURED", "VOIDED", "REMEDIATION"] = "AUTHORIZED"
+    amount_cents: int = 0
+    status: Literal["DRAFT", "AUTHORIZED", "ARBITRATING", "PARTIAL", "CAPTURED", "VOIDED", "REMEDIATION"] = "AUTHORIZED"
     mode: str = "simulated"
     remediation_used: bool = False
     last_error: Optional[str] = None
@@ -125,6 +130,10 @@ class ContractCreateRequest(BaseModel):
 class ExecuteDemoRequest(BaseModel):
     scenario_id: Optional[str] = None
     contract_id: Optional[str] = None
+
+
+class FundCompleteRequest(BaseModel):
+    order_id: str
 
 
 class SubmitDeliverableRequest(BaseModel):

@@ -285,3 +285,13 @@ class PayPalClient:
             "expiration": data.get("expiration_time"),
             "timestamp": data.get("update_time", _now()),
         }
+
+    def sim_authorization_state(self, authorization_id: str) -> str | None:
+        """Synchronous simulated-mode state for the reconciliation job."""
+        if not authorization_id:
+            return None
+        if authorization_id in self._sim_voided:
+            return "VOIDED"
+        if authorization_id in self._sim_captures:
+            return "CAPTURED"
+        return "APPROVED"

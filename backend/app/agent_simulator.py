@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import config
 from . import db
+from . import money
 from .arbiter import evaluate_deliverable
 from .models import (
     Deliverable,
@@ -359,34 +360,54 @@ async def run_full_cycle(
               "currency": contract.currency, "criteria": contract.acceptance_criteria},
     )
 
-    started = time.perf_counter()
-    order = await paypal.create_authorized_order(
-        contract.bounty_value, contract.currency, f"SynapsePay escrow: {contract.title}"
-    )
-    auth = await paypal.authorize_order(order["order_id"])
-    authorize_ms = int((time.perf_counter() - started) * 1000)
+    existing = ESCROWS.get(contract.id)
+    if existing is not None and existing.status in ("CAPTURED", "PARTIAL", "VOIDED"):
+        raise ValueError(
+            f"contract {contract.id} is already settled ({existing.status}) — create a new contract instead"
+        )
 
-    escrow = EscrowRecord(
-        contract_id=contract.id,
-        order_id=order["order_id"],
-        authorization_id=auth["authorization_id"],
-        amount=contract.bounty_value,
-        currency=contract.currency,
-        status="AUTHORIZED",
-        mode=order["mode"],
-    )
-    ESCROWS[contract.id] = escrow
-    db.save_escrow(escrow.model_dump())
+    if existing is not None and existing.status in ("AUTHORIZED", "REMEDIATION"):
+        # Reuse the live reservation: a second authorization would orphan the first hold.
+        escrow = existing
+        await emit(
+            "paypal_authorized", "paypal-vault",
+            f"Reusing existing authorization {escrow.authorization_id} — no additional hold placed "
+            f"(one authorization per contract)",
+            latency_ms=0,
+            data={"order_id": escrow.order_id, "authorization_id": escrow.authorization_id,
+                  "mode": escrow.mode, "amount": escrow.amount,
+                  "currency": escrow.currency, "status": escrow.status, "reused": True},
+        )
+    else:
+        started = time.perf_counter()
+        order = await paypal.create_authorized_order(
+            contract.bounty_value, contract.currency, f"SynapsePay escrow: {contract.title}"
+        )
+        auth = await paypal.authorize_order(order["order_id"])
+        authorize_ms = int((time.perf_counter() - started) * 1000)
 
-    await emit(
-        "paypal_authorized", "paypal-vault",
-        f"Escrow authorized (funds RESERVED, not deposited) — order {order['order_id']}, "
-        f"authorization {auth['authorization_id']} ({order['mode']})",
-        latency_ms=authorize_ms,
-        data={"order_id": order["order_id"], "authorization_id": auth["authorization_id"],
-              "mode": order["mode"], "amount": contract.bounty_value,
-              "currency": contract.currency, "status": "AUTHORIZED"},
-    )
+        escrow = EscrowRecord(
+            contract_id=contract.id,
+            order_id=order["order_id"],
+            authorization_id=auth["authorization_id"],
+            amount=contract.bounty_value,
+            currency=contract.currency,
+            status="AUTHORIZED",
+            mode=order["mode"],
+            amount_cents=money.to_cents(contract.bounty_value),
+        )
+        ESCROWS[contract.id] = escrow
+        db.save_escrow(escrow.model_dump())
+
+        await emit(
+            "paypal_authorized", "paypal-vault",
+            f"Escrow authorized (funds RESERVED, not deposited) — order {order['order_id']}, "
+            f"authorization {auth['authorization_id']} ({order['mode']})",
+            latency_ms=authorize_ms,
+            data={"order_id": order["order_id"], "authorization_id": auth["authorization_id"],
+                  "mode": order["mode"], "amount": contract.bounty_value,
+                  "currency": contract.currency, "status": "AUTHORIZED", "reused": False},
+        )
 
     await emit("worker_execution_start", contract.worker, "Worker ingested TaskSpec — executing workload")
     await asyncio.sleep(0.55)
@@ -583,9 +604,11 @@ async def _arbitrate_locked(
     receipt: SettlementReceipt | None = None
 
     if decision in ("CAPTURE", "PARTIAL"):
+        total_cents = money.to_cents(escrow.amount)
         fraction = evaluation.payout_fraction
-        capture_amount = round(escrow.amount * fraction, 2)
-        released_amount = round(escrow.amount - capture_amount, 2)
+        capture_cents, released_cents = money.partial_split(total_cents, fraction)
+        capture_amount = money.from_cents(capture_cents)
+        released_amount = money.from_cents(released_cents)
         outcome = await _attempt_capture(escrow, capture_amount)
 
         if outcome["ok"]:
@@ -628,8 +651,11 @@ async def _arbitrate_locked(
                 authorization_id=escrow.authorization_id,
                 amount=escrow.amount,
                 currency=escrow.currency,
+                amount_cents=total_cents,
                 captured_amount=capture_amount,
                 released_amount=released_amount,
+                captured_cents=capture_cents,
+                released_cents=released_cents,
                 mode=cap["mode"],
                 timestamp=cap["timestamp"],
                 notes=notes + (" (idempotent duplicate suppressed)" if cap.get("duplicate") else ""),
@@ -654,8 +680,11 @@ async def _arbitrate_locked(
                 authorization_id=escrow.authorization_id,
                 amount=escrow.amount,
                 currency=escrow.currency,
+                amount_cents=money.to_cents(escrow.amount),
                 captured_amount=0.0,
                 released_amount=escrow.amount,
+                captured_cents=0,
+                released_cents=money.to_cents(escrow.amount),
                 mode=escrow.mode,
                 notes=f"Capture failed: {outcome['message']} — the reservation was released and no money moved.",
             )
@@ -696,8 +725,11 @@ async def _arbitrate_locked(
                 authorization_id=escrow.authorization_id,
                 amount=escrow.amount,
                 currency=escrow.currency,
+                amount_cents=money.to_cents(escrow.amount),
                 captured_amount=0.0,
                 released_amount=escrow.amount,
+                captured_cents=0,
+                released_cents=money.to_cents(escrow.amount),
                 mode=voided["mode"],
                 timestamp=voided["timestamp"],
                 notes="Funds returned to orchestrator-agent-a. Neural Arbiter verdict: deliverable failed "
@@ -729,8 +761,11 @@ async def _arbitrate_locked(
                     authorization_id=escrow.authorization_id,
                     amount=escrow.amount,
                     currency=escrow.currency,
+                    amount_cents=money.to_cents(escrow.amount),
                     captured_amount=escrow.amount,
                     released_amount=0.0,
+                    captured_cents=money.to_cents(escrow.amount),
+                    released_cents=0,
                     mode=escrow.mode,
                     notes=(
                         "CONFLICT FLAGGED FOR REVIEW: the arbiter verdict was VOID, but PayPal reports "
@@ -871,6 +906,9 @@ async def sweep_expired() -> list[dict]:
             message=f"Deadline sweep auto-voided contract {cid} — ${escrow.amount:.2f} reservation released",
             level="warn", data={"contract_id": cid, "receipt": receipt.model_dump()},
         ))
+        if contract is not None and contract.state != "EXPIRED":
+            contract.state = "EXPIRED"
+            db.save_contract(contract.model_dump())
         swept.append({"contract_id": cid, "amount": escrow.amount})
     return swept
 

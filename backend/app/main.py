@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import json
 import re
 import time
@@ -10,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import config
+from . import money
 from .agent_simulator import (
     CONTRACTS,
     DELIVERABLES,
@@ -27,11 +30,19 @@ from .arbiter import evaluate_deliverable
 from .auth import require_user, router as auth_router
 from .db import init as db_init
 from .db import enabled as db_enabled
+from .lifecycle import (
+    complete_funding,
+    reconcile_escrows,
+    reauthorization_recommended,
+    reauthorize_escrow,
+    start_funding,
+)
 from .models import (
     ContractCreateRequest,
     Deliverable,
     EscrowRecord,
     ExecuteDemoRequest,
+    FundCompleteRequest,
     SubmitDeliverableRequest,
     TaskContract,
     deadline_from_hours,
@@ -53,7 +64,23 @@ async def lifespan(_app):
             f"[synapsepay] startup: persistence={'on' if db_enabled() else 'off'}, "
             f"restored={restore}, deadline-swept={len(swept)}"
         )
+    stop_event = asyncio.Event()
+
+    async def periodic_jobs():
+        while not stop_event.is_set():
+            try:
+                await sweep_expired()
+                await reconcile_escrows()
+            except Exception:
+                pass
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=60)
+
+    jobs_task = asyncio.create_task(periodic_jobs())
     yield
+    stop_event.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await jobs_task
     from . import db
 
     db.close()
@@ -272,6 +299,7 @@ async def create_contract(req: ContractCreateRequest, _user=Depends(require_user
         authorization_id=auth["authorization_id"],
         amount=contract.bounty_value,
         currency=contract.currency,
+        amount_cents=money.to_cents(contract.bounty_value),
         status="AUTHORIZED",
         mode=order["mode"],
     )
@@ -403,6 +431,103 @@ async def arbitrate_contract(contract_id: str, _user=Depends(require_user)) -> d
         "receipt": receipt.model_dump() if receipt else None,
         "remediation": escrow.status == "REMEDIATION",
     }
+
+
+@app.post("/api/contracts/draft")
+async def create_draft_contract(req: ContractCreateRequest, _user=Depends(require_user)) -> dict:
+    errors = _validate_create(req)
+    if errors:
+        raise HTTPException(status_code=422, detail="; ".join(errors))
+    contract = TaskContract(
+        title=req.title.strip(),
+        description=req.description[:2000],
+        bounty_value=req.bounty_value,
+        currency=req.currency,
+        acceptance_criteria=req.acceptance_criteria,
+        deliverable_schema=req.deliverable_schema or {"type": "code", "required_functions": []},
+        test_code=req.test_code,
+        worker_code=req.worker_code,
+        timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
+        state="DRAFT",
+    )
+    contract.arbiter_weights = {
+        "tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM,
+    }
+    contract.deadline_hours, contract.deadline_at = deadline_from_hours(
+        req.deadline_hours, config.DEADLINE_HOURS_DEFAULT, config.DEADLINE_HOURS_MAX
+    )
+    CONTRACTS[contract.id] = contract
+
+    from . import db
+
+    db.save_contract(contract.model_dump())
+    return {
+        "contract": contract.model_dump(),
+        "state": "DRAFT",
+        "next": f"POST /api/contracts/{contract.id}/fund/start",
+        "note": "Draft contracts hold no PayPal reservation until funding completes.",
+    }
+
+
+@app.post("/api/contracts/{contract_id}/fund/start")
+async def fund_start(contract_id: str, _user=Depends(require_user)) -> dict:
+    contract = CONTRACTS.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    try:
+        started = await start_funding(contract)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PayPalError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "contract_id": contract_id,
+        **started,
+        "next": "POST /api/contracts/{id}/fund/complete with this order_id"
+        if started["mode"] == "simulated"
+        else "buyer approves this order via the PayPal JS SDK, then POST fund/complete",
+    }
+
+
+@app.post("/api/contracts/{contract_id}/fund/complete")
+async def fund_complete(contract_id: str, body: FundCompleteRequest, _user=Depends(require_user)) -> dict:
+    contract = CONTRACTS.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    try:
+        escrow = await complete_funding(contract, body.order_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PayPalError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "contract_id": contract_id,
+        "escrow": escrow.model_dump(),
+        "semantics": "Authorization RESERVED the funds; nothing is deposited until capture.",
+    }
+
+
+@app.post("/api/contracts/{contract_id}/reauthorize")
+async def reauthorize_contract(contract_id: str, _user=Depends(require_user)) -> dict:
+    contract = CONTRACTS.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    escrow = ESCROWS.get(contract_id)
+    if escrow is None:
+        raise HTTPException(status_code=409, detail="contract has no escrow to re-authorize")
+    try:
+        escrow = await reauthorize_escrow(contract, escrow)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PayPalError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"contract_id": contract_id, "escrow": escrow.model_dump()}
+
+
+@app.post("/api/maintenance/reconcile")
+async def maintenance_reconcile(_user=Depends(require_user)) -> dict:
+    findings = await reconcile_escrows()
+    return {"findings": findings, "count": len(findings)}
 
 
 @app.post("/api/maintenance/sweep")
