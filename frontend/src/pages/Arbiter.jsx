@@ -2,9 +2,15 @@ import { useState } from "react";
 import { Asterisk, Loader2, Lock, ScrollText, ShieldCheck, Upload } from "lucide-react";
 import EvaluationCard from "../components/EvaluationCard.jsx";
 import { Chip, EmptyState, PageIntro, ScoreBar, SectionHeader, StatusChip } from "../components/ui.jsx";
-import { fmtUSD, getEvaluations } from "../api.js";
+import { fmtUSD, getContractEvaluations } from "../api.js";
+import { useApp } from "../context.jsx";
+import { useNavigate } from "react-router-dom";
 
-export default function Arbiter({ contracts, running, onArbitrateRun, onNavigate }) {
+export default function Arbiter() {
+  const { contracts, running, runArbitration } = useApp();
+  const navigate = useNavigate();
+  const onArbitrateRun = (cid, code) => runArbitration(cid, code);
+  const onNavigate = (page) => navigate(page === "contracts" ? "/contracts" : "/studio");
   const [selectedId, setSelectedId] = useState(null);
   const [code, setCode] = useState("");
   const [result, setResult] = useState(null);
@@ -22,7 +28,7 @@ export default function Arbiter({ contracts, running, onArbitrateRun, onNavigate
     setError(null);
     setCode(c.worker_code || "");
     try {
-      const trail = await getEvaluations(c.id);
+      const trail = await getContractEvaluations(c.id);
       setAudit(trail.evaluations || []);
     } catch {
       setAudit([]);
@@ -36,7 +42,7 @@ export default function Arbiter({ contracts, running, onArbitrateRun, onNavigate
     try {
       const res = await onArbitrateRun(selected.id, code);
       setResult(res);
-      const trail = await getEvaluations(selected.id);
+      const trail = await getContractEvaluations(selected.id);
       setAudit(trail.evaluations || []);
     } catch (e) {
       setError(String(e.message || e));

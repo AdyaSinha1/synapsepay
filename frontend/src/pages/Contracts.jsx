@@ -1,11 +1,16 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { Check, Loader2, Play, Sparkles } from "lucide-react";
 import { Chip, PageIntro, SectionHeader, StatusChip } from "../components/ui.jsx";
+import { useApp } from "../context.jsx";
 import { fmtUSD } from "../api.js";
 
 const inputCls = "input";
 
-export default function Contracts({ scenarios, contracts, running, onCreateAndRun, onRunCycle, lastEscrow }) {
+export default function Contracts() {
+  const { scenarios, contracts, running, createAndRun, runCycle, lastEscrow, showError } = useApp();
+  const onCreateAndRun = (payload) => createAndRun(payload).catch(showError);
+  const onRunCycle = (cid) => runCycle({ contract_id: cid }).catch(showError);
   const [form, setForm] = useState({
     title: "Refactor billing microservice",
     bounty: 25,
@@ -140,7 +145,7 @@ export default function Contracts({ scenarios, contracts, running, onCreateAndRu
                 {contracts.slice(0, 6).map((c) => (
                   <li key={c.id} className="rounded-xl border border-line px-4 py-3">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="truncate text-sm font-medium text-ink">{c.title}</p>
+                      <Link to={`/contracts/${c.id}`} className="truncate text-sm font-medium text-ink hover:text-lilac-ink">{c.title}</Link>
                       <StatusChip status={c.escrow?.status || "PENDING"} />
                     </div>
                     <div className="mt-1 flex items-center justify-between">

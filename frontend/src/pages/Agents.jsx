@@ -3,8 +3,10 @@ import EventFeed from "../components/EventFeed.jsx";
 import FlowSteps from "../components/FlowSteps.jsx";
 import { Chip, PageIntro, SectionHeader, StatCard } from "../components/ui.jsx";
 import { fmtPct } from "../api.js";
+import { useApp } from "../context.jsx";
 
-export default function Agents({ metrics, lastRun, liveEvents, running }) {
+export default function Agents() {
+  const { metrics, lastRun, liveEvents, running } = useApp();
   const m = metrics || { cycles: 0, avg_arbiter_ms: 0, success_rate: 0 };
   const hasData = m.cycles > 0;
 

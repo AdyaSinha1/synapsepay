@@ -2,8 +2,14 @@ import { CircleDollarSign, Clock, Coins, TrendingDown, Wallet } from "lucide-rea
 import TransactionTable from "../components/TransactionTable.jsx";
 import { PageIntro, StatCard } from "../components/ui.jsx";
 import { fmtUSD, zipContracts } from "../api.js";
+import { useApp } from "../context.jsx";
+import { useNavigate } from "react-router-dom";
 
-export default function Payments({ metrics, contractsRaw, running, onRunDemo, onNavigate }) {
+export default function Payments() {
+  const { metrics, contractsRaw, running, runScenario, showError } = useApp();
+  const navigate = useNavigate();
+  const onRunDemo = (sid) => runScenario(sid).catch(showError);
+  const onNavigate = (page) => navigate(page === "studio" ? "/studio" : "/dashboard");
   const m = metrics;
   const hasData = Boolean(m && m.cycles > 0);
   const rows = zipContracts(contractsRaw);

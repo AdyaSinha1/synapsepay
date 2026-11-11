@@ -2,6 +2,7 @@ import { Check, Loader2, Play } from "lucide-react";
 import EventFeed from "../components/EventFeed.jsx";
 import Pipeline from "../components/Pipeline.jsx";
 import { Chip, PageIntro } from "../components/ui.jsx";
+import { useApp } from "../context.jsx";
 import { fmtUSD } from "../api.js";
 
 function outcomeInfo(expected, amount) {
@@ -10,15 +11,11 @@ function outcomeInfo(expected, amount) {
   return { tone: "coral", label: `Will void ${fmtUSD(amount)}` };
 }
 
-export default function DemoStudio({
-  scenarios,
-  running,
-  liveEvents,
-  runStage,
-  lastRun,
-  onRunScenario,
-  activeScenario,
-}) {
+export default function DemoStudio() {
+  const {
+    scenarios, running, liveEvents, runStage, lastRun, activeScenario, runScenario, showError,
+  } = useApp();
+  const onRunScenario = (sid) => runScenario(sid).catch(showError);
   const decision = lastRun?.evaluation?.decision || null;
   const captured = decision === "CAPTURE";
 

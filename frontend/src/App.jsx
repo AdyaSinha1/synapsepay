@@ -1,313 +1,53 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import confetti from "canvas-confetti";
-import { CheckCircle2, XCircle } from "lucide-react";
-import Sidebar from "./components/Sidebar.jsx";
-import Topbar from "./components/Topbar.jsx";
-import Overview from "./pages/Overview.jsx";
-import Contracts from "./pages/Contracts.jsx";
-import DemoStudio from "./pages/DemoStudio.jsx";
+import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import Shell from "./components/Shell.jsx";
+import { useApp } from "./context.jsx";
 import Agents from "./pages/Agents.jsx";
 import Arbiter from "./pages/Arbiter.jsx";
+import Board from "./pages/Board.jsx";
+import ContractDetail from "./pages/ContractDetail.jsx";
+import Contracts from "./pages/Contracts.jsx";
+import Dashboard from "./pages/Dashboard.jsx";
+import DemoStudio from "./pages/DemoStudio.jsx";
+import Landing from "./pages/Landing.jsx";
+import Login from "./pages/Login.jsx";
 import Payments from "./pages/Payments.jsx";
-import {
-  API_BASE,
-  arbitrate as arbitrateApi,
-  createContract,
-  getContracts,
-  getHealth,
-  getMetrics,
-  getScenarios,
-  runDemo,
-  submitDeliverable,
-} from "./api.js";
+import Settings from "./pages/Settings.jsx";
+import Wizard from "./pages/Wizard.jsx";
+import Workspace from "./pages/Workspace.jsx";
 
-const MILESTONES = {
-  contract_formulated: 1,
-  paypal_authorized: 2,
-  worker_delivered: 3,
-  arbiter_decision: 4,
-  paypal_settlement: 5,
-};
-
-function mergeEvents(streamed, finalEvents) {
-  const seen = new Set(streamed.map((e) => `${e.ts}|${e.stage}|${e.message}`));
-  return [...streamed, ...(finalEvents || []).filter((e) => !seen.has(`${e.ts}|${e.stage}|${e.message}`))];
+function RequireAuth({ children, role }) {
+  const { user } = useApp();
+  if (!user) return <Navigate to="/login" replace />;
+  if (role && user.role !== role) return <Navigate to="/dashboard" replace />;
+  return children;
 }
 
 export default function App() {
-  const [page, setPage] = useState("overview");
-  const [health, setHealth] = useState(null);
-  const [scenarios, setScenarios] = useState([]);
-  const [metrics, setMetrics] = useState(null);
-  const [contractsRaw, setContractsRaw] = useState(null);
-  const [lastRun, setLastRun] = useState(null);
-  const [lastEscrow, setLastEscrow] = useState(null);
-  const [liveEvents, setLiveEvents] = useState([]);
-  const [runStage, setRunStage] = useState(0);
-  const [running, setRunning] = useState(false);
-  const [activeScenario, setActiveScenario] = useState(null);
-  const [toast, setToast] = useState(null);
-  const [errorPanel, setErrorPanel] = useState(null);
-  const [everFailed, setEverFailed] = useState(false);
-  const toastTimer = useRef(null);
-
-  const showToast = useCallback((msg, tone = "volt") => {
-    clearTimeout(toastTimer.current);
-    setToast({ msg, tone });
-    toastTimer.current = setTimeout(() => setToast(null), 4500);
-  }, []);
-
-  const showError = useCallback((e) => {
-    setToast(null);
-    setErrorPanel(String((e && e.message) || e || "Unknown error"));
-  }, []);
-
-  const celebrate = useCallback(() => {
-    confetti({
-      particleCount: 160,
-      spread: 75,
-      origin: { y: 0.6 },
-      colors: ["#D9F45B", "#8B7BE8", "#262038"],
-    });
-  }, []);
-
-  const refreshData = useCallback(async () => {
-    try {
-      const [h, m, c] = await Promise.all([getHealth(), getMetrics(), getContracts()]);
-      setHealth(h);
-      setMetrics(m);
-      setContractsRaw(c);
-      setEverFailed(false);
-    } catch {
-      setHealth(null);
-      setEverFailed(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    getScenarios().then(setScenarios).catch(() => {});
-    refreshData();
-    const id = setInterval(refreshData, 12000);
-    return () => clearInterval(id);
-  }, [refreshData]);
-
-  useEffect(() => {
-    let closed = false;
-    let ws;
-    const connect = () => {
-      ws = new WebSocket(`${API_BASE.replace(/^http/, "ws")}/ws/events`);
-      ws.onmessage = (e) => {
-        try {
-          const evt = JSON.parse(e.data);
-          setLiveEvents((prev) => [...prev, evt]);
-          const milestone = MILESTONES[evt.stage];
-          if (milestone) setRunStage((s) => Math.max(s, milestone));
-        } catch {
-          /* ignore malformed frames */
-        }
-      };
-      ws.onclose = () => {
-        if (!closed) setTimeout(connect, 3000);
-      };
-    };
-    connect();
-    return () => {
-      closed = true;
-      if (ws) ws.close();
-    };
-  }, []);
-
-  const runCycle = useCallback(
-    async (payload, { scenarioId = null } = {}) => {
-      setRunning(true);
-      setLiveEvents([]);
-      setRunStage(0);
-      setActiveScenario(scenarioId);
-      try {
-        const data = await runDemo(payload);
-        setLastRun(data);
-        setLiveEvents((prev) => mergeEvents(prev, data.events));
-        setRunStage(5);
-        await refreshData();
-        if (data.evaluation?.decision === "CAPTURE") {
-          celebrate();
-          showToast(`Captured ${data.receipt?.transaction_id} — worker paid`, "volt");
-        } else {
-          showToast(`Voided — hirer refunded (${data.receipt?.transaction_id})`, "coral");
-        }
-        return data;
-      } finally {
-        setRunning(false);
-        setActiveScenario(null);
-      }
-    },
-    [celebrate, refreshData, showToast]
-  );
-
-  const runScenario = useCallback((scenarioId) => runCycle({ scenario_id: scenarioId }, { scenarioId }), [runCycle]);
-
-  const createAndRun = useCallback(
-    async (payload) => {
-      if (payload.scenario_id) {
-        await runScenario(payload.scenario_id);
-        return;
-      }
-      const created = await createContract(payload);
-      setLastEscrow(created.escrow);
-      showToast("Escrow authorized — funds reserved (not deposited)", "lilac");
-      await refreshData();
-      if (payload.run_now !== false) {
-        try {
-          await runCycle({ contract_id: created.contract.id });
-        } catch (e) {
-          showError(e);
-        }
-      }
-    },
-    [refreshData, runCycle, runScenario, showError, showToast]
-  );
-
-  const runArbitration = useCallback(
-    async (contractId, code) => {
-      await submitDeliverable(contractId, {
-        artifact_type: "code",
-        code,
-        notes: "Submitted from the AI Arbiter page",
-      });
-      const res = await arbitrateApi(contractId);
-      await refreshData();
-      if (res.evaluation?.decision === "CAPTURE") {
-        celebrate();
-        showToast(`Captured ${res.receipt?.transaction_id} — worker paid`, "volt");
-      } else {
-        showToast(`Voided — hirer refunded (${res.receipt?.transaction_id})`, "coral");
-      }
-      return res;
-    },
-    [celebrate, refreshData, showToast]
-  );
-
-  const safeRun = useCallback(
-    (fn) => {
-      fn().catch((e) => showError(e));
-    },
-    [showError]
-  );
-
-  const contracts = [];
-  if (contractsRaw && Array.isArray(contractsRaw.contracts)) {
-    const escrows = contractsRaw.escrows || [];
-    contractsRaw.contracts
-      .map((c) => ({ ...c, escrow: escrows.find((e) => e.contract_id === c.id) || null }))
-      .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
-      .forEach((c) => contracts.push(c));
-  }
-
-  const pages = {
-    overview: (
-      <Overview
-        metrics={metrics}
-        contractsRaw={contractsRaw}
-        lastRun={lastRun}
-        running={running}
-        onRunDemo={(sid) => safeRun(() => runScenario(sid))}
-        onNavigate={setPage}
-      />
-    ),
-    contracts: (
-      <Contracts
-        scenarios={scenarios}
-        contracts={contracts}
-        running={running}
-        onCreateAndRun={(p) => safeRun(() => createAndRun(p))}
-        onRunCycle={(cid) => safeRun(() => runCycle({ contract_id: cid }))}
-        lastEscrow={lastEscrow}
-      />
-    ),
-    studio: (
-      <DemoStudio
-        scenarios={scenarios}
-        running={running}
-        liveEvents={liveEvents}
-        runStage={runStage}
-        lastRun={lastRun}
-        activeScenario={activeScenario}
-        onRunScenario={(sid) => safeRun(() => runScenario(sid))}
-      />
-    ),
-    agents: <Agents metrics={metrics} lastRun={lastRun} liveEvents={liveEvents} running={running} />,
-    arbiter: (
-      <Arbiter
-        contracts={contracts}
-        running={running}
-        onArbitrateRun={runArbitration}
-        onNavigate={setPage}
-      />
-    ),
-    payments: (
-      <Payments
-        metrics={metrics}
-        contractsRaw={contractsRaw}
-        running={running}
-        onRunDemo={(sid) => safeRun(() => runScenario(sid))}
-        onNavigate={setPage}
-      />
-    ),
-  };
-
   return (
-    <div className="flex min-h-screen">
-      <Sidebar page={page} onNavigate={setPage} health={health} />
-      <div className="min-w-0 flex-1">
-        <Topbar page={page} health={health} onNavigate={setPage} />
-        {everFailed && !health && (
-          <div className="border-b border-sun/40 bg-sun-100 px-5 py-2.5 text-center text-xs font-semibold text-sun-ink sm:px-8">
-            Backend waking up — free-tier hosts sleep when idle and can take 30-60s to respond.
-            Retrying automatically every 12s; data appears the moment it answers.
-          </div>
-        )}
-        <main className="mx-auto max-w-6xl px-5 py-8 sm:px-8">{pages[page]}</main>
-      </div>
-
-      {errorPanel && (
-        <div className="fade-up fixed bottom-6 left-6 z-50 max-w-sm rounded-2xl border border-coral/40 bg-coral-100 p-4 shadow-card">
-          <p className="text-xs font-bold uppercase tracking-wide text-coral-ink">Action failed</p>
-          <p className="mt-1.5 break-words text-xs leading-relaxed text-coral-ink/90">{errorPanel}</p>
-          <p className="mt-1.5 text-[11px] leading-relaxed text-coral-ink/70">
-            On free-tier hosting the first request can take up to a minute while the API wakes up.
-            Funds are only ever reserved after a successful authorization.
-          </p>
-          <div className="mt-3 flex gap-2">
-            <button
-              className="btn-plum !px-3 !py-1.5 text-xs"
-              onClick={() => {
-                setErrorPanel(null);
-                refreshData();
-              }}
-            >
-              Retry connection
-            </button>
-            <button className="btn-ghost !px-3 !py-1.5 text-xs" onClick={() => setErrorPanel(null)}>
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
-
-      {toast && (
-        <div
-          className={`fade-up fixed bottom-6 right-6 z-50 flex items-center gap-2.5 rounded-2xl border px-4 py-3 text-sm font-semibold shadow-card ${
-            toast.tone === "coral"
-              ? "border-coral/30 bg-coral-100 text-coral-ink"
-              : toast.tone === "lilac"
-                ? "border-lilac/30 bg-lilac-100 text-lilac-ink"
-                : "border-volt-deep/40 bg-volt-soft text-volt-ink"
-          }`}
-        >
-          {toast.tone === "coral" ? <XCircle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
-          {toast.msg}
-        </div>
-      )}
-    </div>
+    <Routes>
+      <Route element={<Shell />}>
+        <Route path="/" element={<Landing />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/contracts" element={<Contracts />} />
+        <Route path="/contracts/new" element={<Wizard />} />
+        <Route path="/contracts/:id" element={<ContractDetail />} />
+        <Route path="/contracts/:id/workspace" element={<Workspace />} />
+        <Route path="/board" element={<Board />} />
+        <Route path="/studio" element={<DemoStudio />} />
+        <Route path="/agents" element={<Agents />} />
+        <Route path="/arbiter" element={<Arbiter />} />
+        <Route path="/payments" element={<Payments />} />
+        <Route
+          path="/settings"
+          element={
+            <RequireAuth>
+              <Settings />
+            </RequireAuth>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
+    </Routes>
   );
 }
