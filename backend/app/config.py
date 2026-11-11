@@ -51,6 +51,10 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 PERSISTENCE_ENABLED = os.getenv("PERSISTENCE_ENABLED", "true").lower() in ("1", "true", "yes")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "synapsepay.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "false").lower() in ("1", "true", "yes")
+SESSION_TTL_HOURS = _env_float("SESSION_TTL_HOURS", 72.0)
 
 W_TESTS = _env_float("W_TESTS", 0.50)
 W_SCHEMA = _env_float("W_SCHEMA", 0.25)
