@@ -169,12 +169,19 @@ Copy `backend/.env.example` to `backend/.env`:
 PAYPAL_CLIENT_ID=...      # developer.paypal.com sandbox app
 PAYPAL_CLIENT_SECRET=...
 GEMINI_API_KEY=...        # aistudio.google.com — else heuristic rubric is used
+DATABASE_URL=             # SQLite by default; Postgres URL in production
+REQUIRE_AUTH=false        # true enforces bearer tokens on business routes
 ARBITER_THRESHOLD=0.85
 PARTIAL_THRESHOLD=0.80
 REMEDIATION_FLOOR=0.70
 SANDBOX_MEMORY_MB=256
 CORS_ORIGINS=http://localhost:5173   # add your deployed frontend origin when hosting
 ```
+
+Database: SQLAlchemy 2.x with an Alembic migration (`cd backend && alembic upgrade head`).
+Dev/test default is a local SQLite file; production points `DATABASE_URL` at Postgres.
+First-party auth (`/api/auth/register|login|me|logout`) stores only SHA-256 session-token
+hashes; business routes enforce it when `REQUIRE_AUTH=true`.
 
 Without keys everything still runs: PayPal falls back to **simulated** mode and Gemini
 falls back to the deterministic heuristic rubric. The UI badge always shows which mode is
