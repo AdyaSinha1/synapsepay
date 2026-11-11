@@ -26,7 +26,7 @@ export default function Payments({ metrics, contractsRaw, running, onRunDemo, on
           icon={CircleDollarSign}
           label="Captured"
           value={hasData ? fmtUSD(m.captured_usd) : "$0.00"}
-          sub={hasData ? `${m.captures} full + ${m.partials} partial payouts` : "No payouts yet"}
+          sub={hasData ? `${m.captures} full + ${m.partials} partial payouts${m.needs_review ? ` · ${m.needs_review} flagged for review` : ""}` : "No payouts yet"}
           accent="text-volt-deep"
         />
         <StatCard

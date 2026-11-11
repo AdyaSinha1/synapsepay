@@ -6,6 +6,7 @@ import pytest
 from app import config
 from app.agent_simulator import (
     CONTRACTS,
+    ESCROWS,
     EVALUATIONS,
     SCENARIOS,
     arbitrate_and_settle,
@@ -334,6 +335,138 @@ def test_heuristic_rubric_is_bounded():
             code='def f(x: int) -> int:\n    """Doc."""\n    try:\n        return x\n    except Exception:\n        raise\n' * 4,
         ),
     )
-    assert 0.30 <= empty[0] <= 0.95
-    assert 0.30 <= rich[0] <= 0.95
+    assert 0.30 <= empty[0] <= 0.75
+    assert 0.30 <= rich[0] <= 0.75
     assert rich[0] > empty[0]
+
+
+def test_lint_flags_getattr_builtins_bypass():
+    schema = {"type": "code", "required_functions": ["f"]}
+    exploit = "def f():\n    return getattr(__builtins__, 'ev' + 'al')('1 + 1')\n"
+    score, details = analyze_code_ast(exploit, schema)
+    assert score == 0.0
+    assert any("policy violation" in d for d in details)
+
+
+def test_lint_flags_dunder_attribute_access():
+    schema = {"type": "code", "required_functions": ["f"]}
+    code = "def f(obj):\n    return obj.__subclasses__()\n"
+    score, details = analyze_code_ast(code, schema)
+    assert score == 0.0
+    assert any("__subclasses__" in d for d in details)
+
+
+def test_single_trivial_test_gets_coverage_factor():
+    from app.arbiter import evaluate_deliverable
+
+    contract = TaskContract(
+        title="t",
+        bounty_value=10.0,
+        timeout_seconds=10.0,
+        test_code="def test_ok():\n    assert add(1, 1) == 2\n",
+        deliverable_schema={"type": "code"},
+        worker_code="def add(a, b):\n    return a + b\n",
+    )
+    evaluation = _run(evaluate_deliverable(contract, Deliverable(artifact_type="code", code=contract.worker_code)))
+    assert evaluation.scores["tests"] == round(1 / 3, 4)
+    assert any("coverage factor" in d for d in evaluation.schema_details)
+    assert evaluation.decision == "VOID"
+
+
+def _client():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    return TestClient(app)
+
+
+def test_health_is_minimal_and_admin_config_is_hidden():
+    client = _client()
+    health = client.get("/api/health").json()
+    assert health["status"] == "ok"
+    assert "arbiter_threshold" not in health
+    assert "weights" not in health
+    assert client.get("/api/config", params={"token": "x"}).status_code == 404
+
+
+def test_create_locks_arbiter_weights_and_validates_inputs():
+    client = _client()
+    tests = (
+        "def test_a():\n    assert slug('a b') == 'a-b'\n"
+        "def test_b():\n    assert slug('A  B') == 'a-b'\n"
+        "def test_c():\n    assert slug('x-y') == 'x-y'\n"
+    )
+    ok = client.post("/api/contracts/create", json={
+        "title": "Weight lock probe",
+        "bounty_value": 10.0,
+        "currency": "USD",
+        "deliverable_schema": {"type": "code", "required_functions": ["slug"]},
+        "test_code": tests,
+        "worker_code": "def slug(s):\n    return '-'.join(s.lower().split())\n",
+        "arbiter_weights": {"tests": 0.0, "schema": 0.0, "llm": 1.0},
+    })
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["contract"]["arbiter_weights"] == {
+        "tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM,
+    }
+    assert body["contract"]["deadline_at"] is not None
+
+    assert client.post("/api/contracts/create", json={"title": "ab", "bounty_value": 10.0}).status_code == 422
+    assert client.post("/api/contracts/create", json={"title": "ok title", "bounty_value": 99999.0}).status_code == 422
+    assert client.post("/api/contracts/create", json={"title": "ok title", "bounty_value": 10.999}).status_code == 422
+    assert client.post("/api/contracts/create", json={"title": "ok title", "bounty_value": 10.0, "currency": "BTC"}).status_code == 422
+    too_few = {"title": "ok title", "bounty_value": 10.0, "deliverable_schema": {"type": "code"},
+               "test_code": "def test_one():\n    assert True\n"}
+    assert client.post("/api/contracts/create", json=too_few).status_code == 422
+    oversized = dict(too_few, test_code="def test_a():\n    assert True\ndef test_b():\n    assert True\ndef test_c():\n    assert True\n", worker_code="x = 1\n" * 20001)
+    assert client.post("/api/contracts/create", json=oversized).status_code == 422
+
+
+def test_void_vs_already_captured_is_flagged_not_paid():
+    from app.agent_simulator import paypal as shared_paypal, RUNS
+
+    contract = build_contract_from_scenario("B")
+    escrow = _fresh_escrow(contract, 50.0)
+
+    async def pre_capture():
+        await shared_paypal.capture_authorization(escrow.authorization_id, 50.0)
+
+    _run(pre_capture())
+    evaluation, settled, receipt, _ = _run(
+        arbitrate_and_settle(contract, build_deliverable(contract), escrow)
+    )
+    assert evaluation.decision == "VOID"
+    assert settled.status == "CAPTURED"
+    assert receipt.needs_review is True
+    assert RUNS[-1]["decision"] == "NEEDS_REVIEW"
+
+
+def test_deadline_sweep_auto_voids_expired_escrows():
+    from datetime import datetime as dt, timedelta as td, timezone as tz
+
+    from app.agent_simulator import ESCROWS, sweep_expired
+
+    contract = build_contract_from_scenario("A")
+    escrow = _fresh_escrow(contract, 75.0)
+    contract.deadline_at = (dt.now(tz.utc) - td(hours=1)).isoformat()
+    CONTRACTS[contract.id] = contract
+    ESCROWS[contract.id] = escrow
+
+    swept = _run(sweep_expired())
+    assert any(s["contract_id"] == contract.id for s in swept)
+    assert escrow.status == "VOIDED"
+    assert escrow.receipt.notes.startswith("Auto-voided by the deadline sweep")
+
+
+def test_submit_blocked_while_arbitrating():
+    client = _client()
+    contract = build_contract_from_scenario("B")
+    escrow = _fresh_escrow(contract, 50.0)
+    escrow.status = "ARBITRATING"
+    CONTRACTS[contract.id] = contract
+    ESCROWS[contract.id] = escrow
+    resp = client.post(f"/api/contracts/{contract.id}/submit", json={"artifact_type": "code", "code": "x = 1\n"})
+    assert resp.status_code == 409
+    assert "arbitration" in resp.json()["detail"]

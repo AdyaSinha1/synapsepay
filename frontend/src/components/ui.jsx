@@ -23,6 +23,7 @@ export function statusTone(status) {
   if (status === "REMEDIATION") return "lilac";
   if (status === "VOIDED") return "coral";
   if (status === "AUTHORIZED") return "lilac";
+  if (status === "ARBITRATING") return "plum";
   return "slate";
 }
 
@@ -33,6 +34,7 @@ export function StatusChip({ status }) {
     REMEDIATION: "Remediation round",
     VOIDED: "Voided",
     AUTHORIZED: "Escrow active",
+    ARBITRATING: "Arbitrating…",
   };
   return <Chip tone={statusTone(status)} dot>{labels[status] || status}</Chip>;
 }

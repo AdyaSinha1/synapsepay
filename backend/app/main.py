@@ -1,8 +1,12 @@
 import json
+import re
+import time
+from collections import deque
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import config
 from .agent_simulator import (
@@ -15,6 +19,7 @@ from .agent_simulator import (
     paypal,
     run_full_cycle,
     scenario_summary,
+    sweep_expired,
 )
 from .arbiter import evaluate_deliverable
 from .models import (
@@ -24,26 +29,78 @@ from .models import (
     ExecuteDemoRequest,
     SubmitDeliverableRequest,
     TaskContract,
+    deadline_from_hours,
 )
 from .paypal_client import PayPalError
+
+app_kwargs = {}
+if not config.DOCS_ENABLED:
+    app_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
 app = FastAPI(
     title="SynapsePay",
     description=(
-        "Trustless, AI-governed escrow and settlement protocol for autonomous agent workflows. "
+        "Trust-minimized, AI-governed escrow for autonomous agent workflows. "
         "Escrow semantics: PayPal AUTHORIZE reserves (not deposits) funds; the Neural Arbiter's "
-        "threshold rule - never the LLM alone - triggers capture, partial capture, or void."
+        "threshold rule - never the LLM alone - triggers capture, partial capture, or void. "
+        "Operator-run arbiter; not permissionless."
     ),
     version=config.APP_VERSION,
+    **app_kwargs,
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=config.CORS_METHODS,
+    allow_headers=config.CORS_HEADERS,
 )
+
+
+class RateLimitMiddleware:
+    """In-memory sliding-window limiter: a first-line abuse brake, not a
+    substitute for an edge gateway. Auth-backed limits are on the roadmap."""
+
+    def __init__(self, app):
+        self.app = app
+        self._general: dict[str, deque] = {}
+        self._arbitrate: dict[str, deque] = {}
+
+    def _hit(self, bucket: dict, key: str, limit: int, now: float) -> bool:
+        q = bucket.setdefault(key, deque())
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= limit:
+            return False
+        q.append(now)
+        return True
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        ip = client[0] if client else "?"
+        path = scope.get("path", "")
+        now = time.time()
+        if path.endswith("/arbitrate"):
+            ok = self._hit(self._arbitrate, ip, config.RATE_LIMIT_ARBITRATE_PER_MINUTE, now)
+            limit = config.RATE_LIMIT_ARBITRATE_PER_MINUTE
+        else:
+            ok = self._hit(self._general, ip, config.RATE_LIMIT_PER_MINUTE, now)
+            limit = config.RATE_LIMIT_PER_MINUTE
+        if not ok:
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": f"Rate limit exceeded ({limit}/min) - slow down and retry."},
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RateLimitMiddleware)
 
 
 class EventBus:
@@ -65,27 +122,77 @@ class EventBus:
 bus = EventBus()
 
 
+def _validate_create(req: ContractCreateRequest) -> list[str]:
+    errors = []
+    if not (3 <= len(req.title.strip()) <= 120):
+        errors.append("title must be 3-120 characters")
+    if req.bounty_value <= 0 or req.bounty_value > config.BOUNTY_MAX:
+        errors.append(f"bounty_value must be between 0 and {config.BOUNTY_MAX}")
+    elif round(req.bounty_value, 2) != req.bounty_value:
+        errors.append("bounty_value supports at most 2 decimal places")
+    if req.currency not in config.CURRENCIES:
+        errors.append(f"currency must be one of {sorted(config.CURRENCIES)}")
+    if len(req.acceptance_criteria) > config.MAX_CRITERIA:
+        errors.append(f"acceptance_criteria limited to {config.MAX_CRITERIA} lines")
+    if len(req.worker_code) > config.MAX_CODE_CHARS:
+        errors.append(f"worker_code limited to {config.MAX_CODE_CHARS} characters")
+    if len(req.test_code) > config.MAX_CODE_CHARS:
+        errors.append(f"test_code limited to {config.MAX_CODE_CHARS} characters")
+    schema_type = (req.deliverable_schema or {}).get("type", "code")
+    if schema_type == "code":
+        test_count = len(re.findall(r"def\s+test_\w+", req.test_code or ""))
+        if test_count < config.MIN_CONTRACT_TESTS:
+            errors.append(
+                f"code contracts need at least {config.MIN_CONTRACT_TESTS} unit tests "
+                f"(found {test_count}) — one trivial test cannot earn a full score"
+            )
+    return errors
+
+
 @app.get("/")
 async def root() -> dict:
-    return {"service": "SynapsePay", "version": config.APP_VERSION, "docs": "/docs", "health": "/api/health"}
+    return {"service": "SynapsePay", "version": config.APP_VERSION, "health": "/api/health"}
 
 
 @app.get("/api/health")
 async def health() -> dict:
+    """Deliberately minimal: no thresholds or weights for submission-tuning."""
     return {
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
         "version": config.APP_VERSION,
         "paypal_mode": paypal.mode,
         "gemini_mode": config.GEMINI_MODE,
-        "gemini_model": config.GEMINI_MODEL,
+        "active_contracts": len(CONTRACTS),
+    }
+
+
+@app.get("/api/config")
+async def admin_config(token: str = "") -> dict:
+    if not config.ADMIN_TOKEN:
+        raise HTTPException(status_code=404, detail="not found")
+    import hmac as hmac_mod
+
+    if not hmac_mod.compare_digest(token, config.ADMIN_TOKEN):
+        raise HTTPException(status_code=404, detail="not found")
+    return {
         "arbiter_threshold": config.ARBITER_THRESHOLD,
         "partial_threshold": config.PARTIAL_THRESHOLD,
         "remediation_floor": config.REMEDIATION_FLOOR,
         "weights": {"tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM},
         "llm_authority_note": "Gemini is advisory only: max composite weight 0.25 < capture threshold 0.85",
-        "sandbox_security": config.SANDBOX_SECURITY_LEVEL,
+        "sandbox": {
+            "backend": config.SANDBOX_BACKEND,
+            "docker_available": None,
+            "timeout_seconds": config.SANDBOX_TIMEOUT_SECONDS,
+            "memory_mb": config.SANDBOX_MEMORY_MB,
+            "security_note": config.SANDBOX_SECURITY_LEVEL,
+        },
         "payment_retries": config.PAYMENT_RETRIES,
+        "rate_limits": {
+            "general_per_minute": config.RATE_LIMIT_PER_MINUTE,
+            "arbitrate_per_minute": config.RATE_LIMIT_ARBITRATE_PER_MINUTE,
+        },
         "active_contracts": len(CONTRACTS),
     }
 
@@ -102,17 +209,25 @@ async def metrics() -> dict:
 
 @app.post("/api/contracts/create")
 async def create_contract(req: ContractCreateRequest) -> dict:
-    if req.bounty_value <= 0:
-        raise HTTPException(status_code=422, detail="bounty_value must be positive")
+    errors = _validate_create(req)
+    if errors:
+        raise HTTPException(status_code=422, detail="; ".join(errors))
     contract = TaskContract(
-        title=req.title,
-        description=req.description,
+        title=req.title.strip(),
+        description=req.description[:2000],
         bounty_value=req.bounty_value,
-        currency=req.currency or "USD",
+        currency=req.currency,
         acceptance_criteria=req.acceptance_criteria,
         deliverable_schema=req.deliverable_schema or {"type": "code", "required_functions": []},
         test_code=req.test_code,
         worker_code=req.worker_code,
+        timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
+    )
+    contract.arbiter_weights = {
+        "tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM,
+    }
+    contract.deadline_hours, contract.deadline_at = deadline_from_hours(
+        req.deadline_hours, config.DEADLINE_HOURS_DEFAULT, config.DEADLINE_HOURS_MAX
     )
     try:
         order = await paypal.create_authorized_order(
@@ -136,6 +251,7 @@ async def create_contract(req: ContractCreateRequest) -> dict:
         "contract": contract.model_dump(),
         "escrow": escrow.model_dump(),
         "order": order,
+        "run_now": req.run_now,
         "semantics": "Authorization RESERVED the funds on the hirer's PayPal account; nothing is deposited until capture.",
     }
 
@@ -159,6 +275,7 @@ async def execute_demo(req: ExecuteDemoRequest) -> dict:
 
 @app.get("/api/contracts")
 async def list_contracts() -> dict:
+    await sweep_expired()
     return {
         "contracts": [c.model_dump() for c in CONTRACTS.values()],
         "escrows": [e.model_dump() for e in ESCROWS.values()],
@@ -167,6 +284,7 @@ async def list_contracts() -> dict:
 
 @app.get("/api/contracts/{contract_id}")
 async def get_contract(contract_id: str) -> dict:
+    await sweep_expired()
     contract = CONTRACTS.get(contract_id)
     if contract is None:
         raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
@@ -196,13 +314,16 @@ async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest) ->
     if contract is None:
         raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
     escrow = ESCROWS.get(contract_id)
-    if escrow is not None and escrow.status in ("CAPTURED", "PARTIAL", "VOIDED"):
-        raise HTTPException(status_code=409, detail=f"contract already settled ({escrow.status})")
+    if escrow is not None and escrow.status not in ("AUTHORIZED", "REMEDIATION"):
+        detail = "arbitration in progress" if escrow.status == "ARBITRATING" else f"contract already settled ({escrow.status})"
+        raise HTTPException(status_code=409, detail=detail)
+    if len(req.code or "") > config.MAX_CODE_CHARS:
+        raise HTTPException(status_code=422, detail=f"code limited to {config.MAX_CODE_CHARS} characters")
     deliverable = Deliverable(
         artifact_type=req.artifact_type,
         code=req.code,
         payload=req.payload,
-        notes=req.notes or "Submitted via agent REST API",
+        notes=(req.notes or "Submitted via agent REST API")[:500],
     )
     DELIVERABLES[contract_id] = deliverable
     return {
@@ -220,6 +341,8 @@ async def arbitrate_contract(contract_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
     escrow = ESCROWS.get(contract_id)
     if escrow is None or escrow.status not in ("AUTHORIZED", "REMEDIATION"):
+        if escrow is not None and escrow.status == "ARBITRATING":
+            raise HTTPException(status_code=409, detail="arbitration already in progress for this contract")
         raise HTTPException(status_code=409, detail="contract escrow is not active (already settled or missing)")
     deliverable = DELIVERABLES.get(contract_id)
     if deliverable is None:
@@ -237,6 +360,12 @@ async def arbitrate_contract(contract_id: str) -> dict:
         "receipt": receipt.model_dump() if receipt else None,
         "remediation": escrow.status == "REMEDIATION",
     }
+
+
+@app.post("/api/maintenance/sweep")
+async def maintenance_sweep() -> dict:
+    swept = await sweep_expired()
+    return {"swept": swept, "count": len(swept)}
 
 
 @app.websocket("/ws/events")

@@ -211,16 +211,18 @@ export default function Arbiter({ contracts, running, onArbitrateRun, onNavigate
               </div>
               <p className="mt-4 rounded-xl bg-lilac-100 px-4 py-3 text-[11px] leading-relaxed text-lilac-ink">
                 <Asterisk className="mr-1 inline h-3.5 w-3.5" />
-                Score 85% or higher captures the escrow; 80–85% triggers a scheduled partial capture; anything below
-                80% voids it. The LLM only feeds one advisory channel — it can never move money by itself.
+                Score 85%+ captures; 80–85% triggers a scheduled partial capture; below 80% voids. Code contracts need
+                at least 3 tests — fewer applies a coverage factor. The LLM only feeds one advisory channel, clamped to
+                0.85; the no-key heuristic fallback is capped at 0.75. Neither can move money alone.
               </p>
               <p className="mt-3 rounded-xl border border-line bg-[#FBFAF5] px-4 py-3 text-[11px] leading-relaxed text-mute">
                 <Lock className="mr-1 inline h-3.5 w-3.5 text-plum-700" />
                 <span className="font-semibold text-ink">Sandbox security:</span> worker code runs in an isolated
-                interpreter (no env, no user site) inside a Job Object with a memory cap, process cap, kill-on-close,
-                and a hard wall-clock timeout. Dynamic execution (eval/exec/import tricks) is banned by AST policy.
-                This is strong defense-in-depth — a certified production deployment should run deliverables in
-                dedicated containers (e.g. gVisor/Firecracker) with network egress denied.
+                interpreter (no env, no user site) inside a Job Object with memory/process caps and kill-on-close — or,
+                when a Docker daemon is available, in a throwaway container (no network, memory/CPU/pids caps,
+                read-only filesystem, non-root). Results come back HMAC-signed and are verified before scoring. The
+                AST policy scan (dynamic execution, reflection, dunder access) is a <span className="font-semibold">lint
+                layer, not the security boundary</span> — the OS sandbox is. Treat every submission as hostile.
               </p>
             </div>
           </div>

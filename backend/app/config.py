@@ -32,6 +32,23 @@ REMEDIATION_FLOOR = _env_float("REMEDIATION_FLOOR", 0.70)
 SANDBOX_TIMEOUT_SECONDS = _env_float("SANDBOX_TIMEOUT_SECONDS", 5.0)
 SANDBOX_MEMORY_MB = _env_int("SANDBOX_MEMORY_MB", 256)
 
+SANDBOX_BACKEND = os.getenv("SANDBOX_BACKEND", "auto")
+SANDBOX_DOCKER_IMAGE = os.getenv("SANDBOX_DOCKER_IMAGE", "python:3.12-slim")
+
+MAX_CODE_CHARS = _env_int("MAX_CODE_CHARS", 20000)
+MAX_CRITERIA = _env_int("MAX_CRITERIA", 20)
+MIN_CONTRACT_TESTS = _env_int("MIN_CONTRACT_TESTS", 3)
+BOUNTY_MAX = _env_float("BOUNTY_MAX", 10000.0)
+CURRENCIES = {"USD", "EUR", "GBP"}
+DEADLINE_HOURS_DEFAULT = _env_float("DEADLINE_HOURS_DEFAULT", 72.0)
+DEADLINE_HOURS_MAX = _env_float("DEADLINE_HOURS_MAX", 24 * 29)
+
+RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 60)
+RATE_LIMIT_ARBITRATE_PER_MINUTE = _env_int("RATE_LIMIT_ARBITRATE_PER_MINUTE", 12)
+
+DOCS_ENABLED = os.getenv("DOCS_ENABLED", "true").lower() in ("1", "true", "yes")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
 W_TESTS = _env_float("W_TESTS", 0.50)
 W_SCHEMA = _env_float("W_SCHEMA", 0.25)
 W_LLM = _env_float("W_LLM", 0.25)
@@ -48,6 +65,9 @@ CORS_ORIGINS = [
     ).split(",")
     if o.strip()
 ]
+
+CORS_METHODS = ["GET", "POST", "OPTIONS"]
+CORS_HEADERS = ["Content-Type", "Authorization"]
 
 APP_VERSION = "1.1.0"
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 from uuid import uuid4
 
@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def deadline_from_hours(hours: float | None, default: float, maximum: float) -> tuple[float, str]:
+    effective = max(0.1, min(maximum, hours if hours is not None else default))
+    return effective, (datetime.now(timezone.utc) + timedelta(hours=effective)).isoformat()
 
 
 def _short_id() -> str:
@@ -29,6 +34,8 @@ class TaskContract(BaseModel):
         default_factory=lambda: {"tests": 0.50, "schema": 0.25, "llm": 0.25}
     )
     timeout_seconds: float = 5.0
+    deadline_hours: Optional[float] = None
+    deadline_at: Optional[str] = None
     created_at: str = Field(default_factory=_now)
 
 
@@ -65,6 +72,7 @@ class SettlementReceipt(BaseModel):
     timestamp: str = Field(default_factory=_now)
     paypal_dashboard_url: str = "https://developer.paypal.com/dashboard/"
     notes: str = ""
+    needs_review: bool = False
 
 
 class EscrowRecord(BaseModel):
@@ -73,9 +81,10 @@ class EscrowRecord(BaseModel):
     authorization_id: str
     amount: float
     currency: str = "USD"
-    status: Literal["AUTHORIZED", "PARTIAL", "CAPTURED", "VOIDED", "REMEDIATION"] = "AUTHORIZED"
+    status: Literal["AUTHORIZED", "ARBITRATING", "PARTIAL", "CAPTURED", "VOIDED", "REMEDIATION"] = "AUTHORIZED"
     mode: str = "simulated"
     remediation_used: bool = False
+    last_error: Optional[str] = None
     authorized_at: str = Field(default_factory=_now)
     settled_at: Optional[str] = None
     settlement_latency_ms: Optional[int] = None
@@ -109,6 +118,8 @@ class ContractCreateRequest(BaseModel):
     deliverable_schema: dict = Field(default_factory=dict)
     test_code: str = ""
     worker_code: str = ""
+    deadline_hours: Optional[float] = None
+    run_now: bool = True
 
 
 class ExecuteDemoRequest(BaseModel):

@@ -42,7 +42,7 @@ export default function Agents({ metrics, lastRun, liveEvents, running }) {
     <div className="space-y-6">
       <PageIntro
         title="AI Agents"
-        sub="Three autonomous parties, zero humans in the loop. Each one plays a fixed role in every escrow cycle."
+        sub="Three autonomous parties with fixed roles in every escrow cycle. The operator runs the arbiter and PayPal holds the funds — this is trust-minimized automation, not a permissionless protocol."
       />
 
       <div className="grid gap-4 lg:grid-cols-3">

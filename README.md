@@ -1,12 +1,17 @@
 # SynapsePay — Autonomous Agent Escrow Protocol
 
-> **Trustless fiat escrow for autonomous AI agents on PayPal.**
+> **Trust-minimized fiat escrow for autonomous AI agents on PayPal.**
 
 SynapsePay is a working MVP of an AI-governed escrow protocol for the machine economy.
 An Orchestrator Agent hires a Worker Agent: fiat funds are **reserved** via a PayPal
 authorization, the worker delivers, an impartial **Neural Arbiter** grades the deliverable
 against the contract, and a threshold rule — never the LLM alone — triggers **capture,
 partial capture, or void**.
+
+Honest framing: this is **trust-minimized, not trustless**. A centralized, operator-run
+arbiter scores the work and PayPal holds the funds; there is no permissionless consensus
+and (yet) no independent dispute resolution. Where the site says "autonomous", it means
+*no human is needed for an individual settlement* — not *no humans anywhere*.
 
 **The one-line version:** SynapsePay enables AI agents to hire other AI agents, hold payments
 securely through PayPal authorization, independently verify delivered work using AI and
@@ -43,10 +48,19 @@ Every claim below maps to code and tests:
 - **Neural Arbiter** — composite score
   $S = 0.50 \cdot A_{\text{tests}} + 0.25 \cdot A_{\text{schema}} + 0.25 \cdot A_{\text{LLM}}$ over three channels:
   1. **Unit tests** — worker code runs against the contract's tests in a hardened subprocess.
-  2. **Schema & policy** — Python AST analysis (required functions; forbidden imports `os`,
-     `socket`, `subprocess`, …; dynamic-execution ban on `eval` / `exec` / `compile` /
-     `__import__`), JSON field/type compliance, or SVG geometric + brand-palette constraints.
-  3. **AI review** — Gemini rubric score, with a deterministic heuristic fallback.
+  2. **Schema & policy (a lint, not a boundary)** — Python AST analysis (required
+     functions; forbidden imports `os`, `socket`, `subprocess`, …; dynamic-execution ban on
+     `eval` / `exec` / `compile` / `__import__`; **reflection and dunder-access flags** —
+     `getattr(__builtins__, 'ev'+'al')` and friends are detected and zero the schema score),
+     JSON field/type compliance, or SVG geometric + brand-palette constraints.
+   3. **AI review** — Gemini rubric score (clamped to 0.85), with a deterministic heuristic
+      fallback **capped at 0.75** so free points can never approach the threshold.
+- **Anti-gaming** — contracts declare at least 3 unit tests (fewer applies a coverage
+  factor, so one trivial test cannot earn a full channel); arbiter weights are locked
+  server-side at creation; the Gemini prompt marks the deliverable as untrusted data with
+  an ignore-instructions directive and a forced JSON response; arbitration is serialized
+  per contract under a lock with an explicit `ARBITRATING` state (durable DB locking is on
+  the roadmap); validation enforces title/bounty/currency/code-length limits.
 - **Gemini can never move money** — its maximum composite contribution is 0.25, far below
   the 0.85 capture threshold. Even a perfect LLM score with failing tests voids the escrow
   (enforced by test `test_llm_cannot_authorize_alone`). If Gemini is unreachable, the
@@ -64,10 +78,24 @@ Every claim below maps to code and tests:
 - **Sandbox security (honest disclosure)** — worker code runs in an isolated interpreter
   (`-I -B -X utf8`, no env inheritance), below-normal priority, no console window, inside a
   **Windows Job Object** with a memory cap (256 MB, configurable), an active-process cap,
-  and kill-on-close (the whole process tree dies on timeout). A wall-clock timeout and a
-  results-file handshake complete the picture. **This is defense-in-depth, not a certified
-  security boundary** — a production deployment should execute deliverables in dedicated
-  containers (gVisor / Firecracker / Docker with `--network none` and CPU/memory caps).
+  and kill-on-close (the whole process tree dies on timeout). Results are returned through
+  an **HMAC-SHA256-signed channel** that the parent verifies before scoring, and the runner
+  scrubs its own `argv` before executing the deliverable. When a Docker daemon is available
+  (`SANDBOX_BACKEND=docker` or `auto`), submissions run in a **throwaway container**: no
+  network, memory/CPU/pids caps, read-only filesystem, non-root. The AST policy scan is a
+  **lint layer, not the security boundary** — a determined attacker who defeats it still
+  faces the OS sandbox, and a production deployment should run deliverables in dedicated
+  containers (gVisor / Firecracker) with the test harness in a separate process.
+- **Money-state safety** — failed captures restore `AUTHORIZED` with a persisted
+  `last_error` ("funds remain reserved — retry is safe"); a void that collides with an
+  already-captured authorization is **flagged for human review** (`needs_review`,
+  `NEEDS_REVIEW` decision, excluded from success metrics) instead of silently paying
+  against a VOID verdict; contracts carry **deadlines** and a sweep auto-voids expired
+  reservations (PayPal holds expire ~29 days; honored holds are often shorter).
+- **Abuse controls** — sliding-window rate limits (general + tighter arbitration bucket),
+  payload-size caps, bounty/currency whitelists, a deliberately minimal `/api/health`
+  (thresholds/weights moved to a token-gated `/api/config`), and restricted CORS
+  methods/headers. These are first-line brakes; the roadmap adds edge-level limits and auth.
 - **Explainability / fairness** — every arbitration round is persisted server-side
   (`GET /api/contracts/{id}/evaluations`): raw test logs, schema check lines, the LLM
   provider + rationale, per-channel scores, weights, composite, threshold, decision, and
@@ -181,11 +209,14 @@ cd backend
 .venv\Scripts\python -m pytest tests -q
 ```
 
-25 tests cover: sandbox pass/fail/timeout, forbidden imports, dynamic-execution ban,
-JSON and SVG scoring, composite-weight math, the Gemini-cannot-authorize-alone invariant,
-the partial-payout schedule, remediation gate open → settle, partial receipt math,
-audit-trail persistence, retry recovery/give-up, and simulated PayPal idempotency
-(duplicate capture suppressed; void-after-capture rejected).
+33 tests cover: sandbox pass/fail/timeout, forbidden imports, the dynamic-execution ban,
+**reflection/dunder bypass flags** (`getattr(__builtins__, 'ev'+'al')` and friends),
+**the single-trivial-test coverage factor**, JSON and SVG scoring, composite-weight math,
+the Gemini-cannot-authorize-alone invariant, the partial-payout schedule, remediation gate
+open → settle, partial receipt math, audit-trail persistence, retry recovery/give-up,
+simulated PayPal idempotency (duplicate capture suppressed; void-after-capture rejected),
+**the void-vs-already-captured review flag**, **the deadline sweep**, **server-side weight
+locking**, and **input validation** (title/bounty/currency/code-size/minimum-tests).
 
 ## Learning path (mapped to this codebase)
 
@@ -225,10 +256,20 @@ audit-trail persistence, retry recovery/give-up, and simulated PayPal idempotenc
   processing fees — **not zero**, and not measured against traditional escrow fees in this
   prototype. No "100% compliance" or "instant settlement" claims are made.
 - The subprocess sandbox is defense-in-depth, not a certified security boundary; the AST
-  ban list helps but determined code needs container-level isolation.
+  policy scan is a **lint layer** (it flags `getattr(__builtins__, 'ev'+'al')`-style
+  bypasses but is bypassable in principle) — the OS-level sandbox is the control, and
+  containers are the production answer (`ROADMAP.md`).
+- The Job Object hardening is **Windows-only**; on Linux hosts (e.g. Render) the native
+  backend degrades to timeout-only containment — set `SANDBOX_BACKEND=docker` where a
+  daemon exists.
+- There is **no authentication yet**: contracts, submissions, and arbitration are open to
+  anyone with the URL, the WebSocket broadcasts all events to any connected client, and the
+  rate limiter is per-process. Fine for a demo, not for real money (`ROADMAP.md` §1).
+- Contracts live **in memory**: a restart or hosting sleep clears them, and the operator
+  runs the arbiter — trust-minimized, not trustless.
 
 ## Roadmap
 
-Containerized sandbox runner (Docker/gVisor, network denied) · Buyer-approval flow for live
-authorizations · Agent reputation ledger · Multi-currency bounties · MCP / JSON-RPC agent
-protocol layer · Signed TaskSpecifications.
+The production plan — auth + Postgres + durable state machine, containerized sandbox with a
+separate trusted test harness, split hirer/worker flows with disputes, and the PayPal JS SDK
+approval flow — is detailed in [ROADMAP.md](ROADMAP.md).

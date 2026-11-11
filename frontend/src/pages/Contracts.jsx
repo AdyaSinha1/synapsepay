@@ -11,7 +11,7 @@ export default function Contracts({ scenarios, contracts, running, onCreateAndRu
     bounty: 25,
     criteria: "Expose charge(notional, tier)\nHandle zero and negative inputs",
     workerCode: "def charge(notional, tier):\n    \"\"\"Charge 1% of notional.\"\"\"\n    return round(notional * 0.01, 2)\n",
-    testCode: "def test_basic():\n    assert charge(100, 'std') == 1.0\n\ndef test_rounding():\n    assert charge(33.333, 'std') == 0.33\n",
+    testCode: "def test_basic():\n    assert charge(100, 'std') == 1.0\n\ndef test_rounding():\n    assert charge(33.333, 'std') == 0.33\n\ndef test_zero():\n    assert charge(0, 'std') == 0.0\n",
     runNow: true,
   });
   const [busy, setBusy] = useState(false);
@@ -91,7 +91,8 @@ export default function Contracts({ scenarios, contracts, running, onCreateAndRu
               {form.runNow ? "Authorize escrow & run cycle" : "Authorize escrow"}
             </button>
             <p className="text-[11px] leading-relaxed text-mute/80">
-              No tests means an automatic void verdict — the arbiter always pays with evidence.
+              Code contracts require at least 3 unit tests — the coverage rule means one trivial test can never earn a
+              full score. The policy scan flags reflection tricks (getattr/eval) as violations.
             </p>
 
             {lastEscrow && (

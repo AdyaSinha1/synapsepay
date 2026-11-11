@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import config
 from .arbiter import evaluate_deliverable
@@ -11,6 +11,7 @@ from .models import (
     EventLogEntry,
     SettlementReceipt,
     TaskContract,
+    deadline_from_hours,
 )
 from .paypal_client import PayPalClient, PayPalError
 
@@ -109,6 +110,7 @@ SCENARIO_C_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120
 
 SCENARIO_D_CODE = '''
 def parse_csv(text: str, skip_blank: bool = True) -> list:
+    """Parse CSV text into a list of dicts keyed by normalized headers."""
     header = [h.strip().lower() for h in text.splitlines()[0].split(",")]
     rows = []
     for line in text.splitlines()[1:]:
@@ -257,6 +259,9 @@ def scenario_summary(scenario_id: str) -> dict:
 
 def build_contract_from_scenario(scenario_id: str) -> TaskContract:
     s = SCENARIOS[scenario_id]
+    hours, deadline_at = deadline_from_hours(
+        None, config.DEADLINE_HOURS_DEFAULT, config.DEADLINE_HOURS_MAX
+    )
     return TaskContract(
         title=f"{s['name']} — {s['subtitle']}",
         description=s["description"],
@@ -266,7 +271,18 @@ def build_contract_from_scenario(scenario_id: str) -> TaskContract:
         deliverable_schema=s["deliverable_schema"],
         test_code=s["test_code"],
         worker_code=s["worker_code"],
+        deadline_hours=hours,
+        deadline_at=deadline_at,
     )
+
+
+def _deadline_passed(contract: TaskContract) -> bool:
+    if not contract.deadline_at:
+        return False
+    try:
+        return datetime.now(timezone.utc) > datetime.fromisoformat(contract.deadline_at)
+    except ValueError:
+        return False
 
 
 def build_deliverable(contract: TaskContract, worker_code: str | None = None) -> Deliverable:
@@ -417,7 +433,32 @@ async def _attempt_capture(escrow: EscrowRecord, amount: float) -> dict:
         return {"ok": False, "kind": exc.kind, "message": str(exc)}
 
 
+_arbitrate_locks: dict[str, tuple[int, asyncio.Lock]] = {}
+
+
+def _arbitrate_lock(contract_id: str) -> asyncio.Lock:
+    """Serialize arbitration per contract (loop-aware so tests can re-enter)."""
+    loop_id = id(asyncio.get_running_loop())
+    entry = _arbitrate_locks.get(contract_id)
+    if entry is None or entry[0] != loop_id:
+        lock = asyncio.Lock()
+        _arbitrate_locks[contract_id] = (loop_id, lock)
+        return lock
+    return entry[1]
+
+
 async def arbitrate_and_settle(
+    contract: TaskContract,
+    deliverable: Deliverable,
+    escrow: EscrowRecord,
+    broadcast=None,
+    allow_remediation_gate: bool = False,
+) -> tuple:
+    async with _arbitrate_lock(contract.id):
+        return await _arbitrate_locked(contract, deliverable, escrow, broadcast, allow_remediation_gate)
+
+
+async def _arbitrate_locked(
     contract: TaskContract,
     deliverable: Deliverable,
     escrow: EscrowRecord,
@@ -441,10 +482,23 @@ async def arbitrate_and_settle(
                 pass
         return event
 
+    prev_status = escrow.status
+    escrow.status = "ARBITRATING"
+    deadline_expired = _deadline_passed(contract)
+
     evaluation = await evaluate_deliverable(contract, deliverable)
     _record_evaluation(contract.id, evaluation)
     sandbox = evaluation.sandbox
     decision = evaluation.decision
+    if deadline_expired and decision != "VOID":
+        decision = "VOID"
+        await emit(
+            "arbiter_decision", "neural-arbiter",
+            f"Contract deadline expired — verdict forced to VOID regardless of composite "
+            f"{evaluation.composite:.4f} (no auto-renewal of PayPal reservations)",
+            level="warn",
+            data={"deadline_expired": True, "composite": evaluation.composite},
+        )
 
     await emit(
         "arbiter_sandbox", "neural-arbiter",
@@ -480,8 +534,9 @@ async def arbitrate_and_settle(
     if (
         allow_remediation_gate
         and decision == "VOID"
-        and escrow.status == "AUTHORIZED"
+        and prev_status == "AUTHORIZED"
         and not escrow.remediation_used
+        and not deadline_expired
         and evaluation.composite >= config.REMEDIATION_FLOOR
     ):
         escrow.status = "REMEDIATION"
@@ -591,6 +646,8 @@ async def arbitrate_and_settle(
                 "settlement_ms": int((time.perf_counter() - settle_started) * 1000),
             })
         else:
+            escrow.status = prev_status
+            escrow.last_error = f"capture failed after {config.PAYMENT_RETRIES + 1} attempts: {outcome['message']}"
             await emit(
                 "paypal_settlement_failed", "paypal-vault",
                 f"Capture failed after {config.PAYMENT_RETRIES + 1} attempts ({outcome['message']}) — "
@@ -636,36 +693,37 @@ async def arbitrate_and_settle(
             })
         except PayPalError as exc:
             if exc.kind == "already_captured":
-                cap = await paypal.capture_authorization(
-                    escrow.authorization_id, escrow.amount, escrow.currency
-                )
                 escrow.status = "CAPTURED"
                 receipt = SettlementReceipt(
                     settlement_type="CAPTURE",
-                    transaction_id=cap["capture_id"],
-                    status=cap["status"],
+                    transaction_id=escrow.authorization_id,
+                    status="COMPLETED",
                     order_id=escrow.order_id,
                     authorization_id=escrow.authorization_id,
                     amount=escrow.amount,
                     currency=escrow.currency,
                     captured_amount=escrow.amount,
                     released_amount=0.0,
-                    mode=cap["mode"],
-                    timestamp=cap["timestamp"],
-                    notes="Void was rejected — the authorization had already been captured. "
-                          "Receipt reconciled to the completed capture (idempotent).",
+                    mode=escrow.mode,
+                    notes=(
+                        "CONFLICT FLAGGED FOR REVIEW: the arbiter verdict was VOID, but PayPal reports "
+                        "this authorization was already captured in an earlier settlement. Funds moved "
+                        "against the verdict — this record is excluded from success metrics and requires "
+                        "manual reconciliation."
+                    ),
+                    needs_review=True,
                 )
                 await emit(
-                    "paypal_settlement", "paypal-vault",
-                    f"Void rejected: authorization already captured — reconciled to capture "
-                    f"{cap['capture_id']} (duplicate suppressed)",
-                    level="warn", data={"receipt": receipt.model_dump()},
+                    "flagged_for_review", "synapsepay",
+                    f"Void rejected: authorization {escrow.authorization_id} was already captured — "
+                    f"verdict/settlement conflict flagged for human review (no metrics credit)",
+                    level="error", data={"receipt": receipt.model_dump(), "kind": exc.kind},
                 )
                 RUNS.append({
                     "contract_id": contract.id, "title": contract.title,
                     "amount": escrow.amount, "currency": escrow.currency,
-                    "decision": "CAPTURE", "composite": evaluation.composite,
-                    "amount_settled": escrow.amount, "amount_released": 0.0,
+                    "decision": "NEEDS_REVIEW", "composite": evaluation.composite,
+                    "amount_settled": 0.0, "amount_released": 0.0,
                     "arbiter_ms": evaluation.arbiter_latency_ms, "mode": escrow.mode, "ts": _now(),
                     "settlement_ms": int((time.perf_counter() - settle_started) * 1000),
                 })
@@ -698,6 +756,8 @@ async def arbitrate_and_settle(
                     "settlement_ms": int((time.perf_counter() - settle_started) * 1000),
                 })
             else:
+                escrow.status = prev_status
+                escrow.last_error = f"void failed after {config.PAYMENT_RETRIES + 1} attempts: {exc}"
                 await emit(
                     "paypal_settlement_failed", "paypal-vault",
                     f"Void failed after {config.PAYMENT_RETRIES + 1} attempts ({exc}) — "
@@ -709,18 +769,85 @@ async def arbitrate_and_settle(
 
     settlement_ms = int((time.perf_counter() - settle_started) * 1000)
     if receipt is not None:
+        escrow.last_error = None
         escrow.settled_at = _now()
         escrow.settlement_latency_ms = settlement_ms
         escrow.receipt = receipt
+    elif escrow.status == "ARBITRATING":
+        escrow.status = prev_status
+        escrow.last_error = "settlement incomplete — funds remain reserved; arbitration can be retried"
 
     return evaluation, escrow, receipt, events
+
+
+async def sweep_expired() -> list[dict]:
+    """Auto-void contracts whose deadline passed while escrow was still reserved."""
+    swept: list[dict] = []
+    for cid, escrow in list(ESCROWS.items()):
+        contract = CONTRACTS.get(cid)
+        if contract is None or not _deadline_passed(contract):
+            continue
+        if escrow.status not in ("AUTHORIZED", "REMEDIATION"):
+            continue
+        try:
+            await paypal.void_authorization(escrow.authorization_id)
+        except PayPalError as exc:
+            if exc.kind == "already_captured":
+                escrow.status = "CAPTURED"
+                escrow.last_error = "deadline sweep found this authorization already captured — flagged for review"
+                _register_event(EventLogEntry(
+                    stage="flagged_for_review", actor="synapsepay",
+                    message=f"Deadline sweep: {cid} already captured — conflict flagged for review",
+                    level="error", data={"contract_id": cid},
+                ))
+                continue
+            escrow.last_error = f"deadline sweep void failed: {exc}"
+            _register_event(EventLogEntry(
+                stage="paypal_settlement_failed", actor="paypal-vault",
+                message=f"Deadline sweep void failed for {cid}: {exc}",
+                level="error", data={"contract_id": cid, "kind": exc.kind},
+            ))
+            continue
+        escrow.status = "VOIDED"
+        escrow.settled_at = _now()
+        receipt = SettlementReceipt(
+            settlement_type="VOID",
+            transaction_id=escrow.authorization_id,
+            status="VOIDED",
+            order_id=escrow.order_id,
+            authorization_id=escrow.authorization_id,
+            amount=escrow.amount,
+            currency=escrow.currency,
+            captured_amount=0.0,
+            released_amount=escrow.amount,
+            mode=escrow.mode,
+            notes="Auto-voided by the deadline sweep: the contract deadline passed while the "
+                  "escrow reservation was still active. PayPal holds expire (~29 days); honored "
+                  "holds are often shorter, so funded contracts carry explicit deadlines.",
+        )
+        escrow.receipt = receipt
+        RUNS.append({
+            "contract_id": cid, "title": contract.title,
+            "amount": escrow.amount, "currency": escrow.currency,
+            "decision": "VOID", "composite": 0.0,
+            "amount_settled": 0.0, "amount_released": escrow.amount,
+            "arbiter_ms": 0, "mode": escrow.mode, "ts": _now(),
+            "settlement_ms": 0,
+        })
+        _register_event(EventLogEntry(
+            stage="paypal_settlement", actor="paypal-vault",
+            message=f"Deadline sweep auto-voided contract {cid} — ${escrow.amount:.2f} reservation released",
+            level="warn", data={"contract_id": cid, "receipt": receipt.model_dump()},
+        ))
+        swept.append({"contract_id": cid, "amount": escrow.amount})
+    return swept
 
 
 def compute_metrics() -> dict:
     total = len(RUNS)
     if not total:
         return {
-            "cycles": 0, "captures": 0, "partials": 0, "voids": 0,
+            "cycles": 0, "captures": 0, "partials": 0, "voids": 0, "needs_review": 0,
             "total_escrowed_usd": 0.0, "captured_usd": 0.0,
             "refunded_usd": 0.0, "released_usd": 0.0,
             "success_rate": 0.0, "avg_arbiter_ms": 0, "avg_settlement_ms": 0,
@@ -728,16 +855,19 @@ def compute_metrics() -> dict:
     captures = [r for r in RUNS if r["decision"] == "CAPTURE"]
     partials = [r for r in RUNS if r["decision"] == "PARTIAL"]
     voids = [r for r in RUNS if r["decision"] == "VOID"]
+    reviews = [r for r in RUNS if r["decision"] == "NEEDS_REVIEW"]
+    scored = total - len(reviews)
     return {
         "cycles": total,
         "captures": len(captures),
         "partials": len(partials),
         "voids": len(voids),
+        "needs_review": len(reviews),
         "total_escrowed_usd": round(sum(r["amount"] for r in RUNS), 2),
         "captured_usd": round(sum(r["amount_settled"] for r in RUNS if r["decision"] in ("CAPTURE", "PARTIAL")), 2),
         "refunded_usd": round(sum(r["amount_released"] for r in voids), 2),
         "released_usd": round(sum(r["amount_released"] for r in partials), 2),
-        "success_rate": round((len(captures) + len(partials)) / total, 4),
+        "success_rate": round((len(captures) + len(partials)) / scored, 4) if scored else 0.0,
         "avg_arbiter_ms": int(sum(r["arbiter_ms"] for r in RUNS) / total),
         "avg_settlement_ms": int(sum(r["settlement_ms"] for r in RUNS) / total),
     }

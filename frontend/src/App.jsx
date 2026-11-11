@@ -47,12 +47,19 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [activeScenario, setActiveScenario] = useState(null);
   const [toast, setToast] = useState(null);
+  const [errorPanel, setErrorPanel] = useState(null);
+  const [everFailed, setEverFailed] = useState(false);
   const toastTimer = useRef(null);
 
   const showToast = useCallback((msg, tone = "volt") => {
     clearTimeout(toastTimer.current);
     setToast({ msg, tone });
     toastTimer.current = setTimeout(() => setToast(null), 4500);
+  }, []);
+
+  const showError = useCallback((e) => {
+    setToast(null);
+    setErrorPanel(String((e && e.message) || e || "Unknown error"));
   }, []);
 
   const celebrate = useCallback(() => {
@@ -70,8 +77,10 @@ export default function App() {
       setHealth(h);
       setMetrics(m);
       setContractsRaw(c);
+      setEverFailed(false);
     } catch {
       setHealth(null);
+      setEverFailed(true);
     }
   }, []);
 
@@ -145,17 +154,17 @@ export default function App() {
       }
       const created = await createContract(payload);
       setLastEscrow(created.escrow);
-      showToast("Escrow authorized — funds locked", "lilac");
+      showToast("Escrow authorized — funds reserved (not deposited)", "lilac");
       await refreshData();
       if (payload.run_now !== false) {
         try {
           await runCycle({ contract_id: created.contract.id });
         } catch (e) {
-          showToast(String(e.message || e), "coral");
+          showError(e);
         }
       }
     },
-    [refreshData, runCycle, runScenario, showToast]
+    [refreshData, runCycle, runScenario, showError, showToast]
   );
 
   const runArbitration = useCallback(
@@ -180,9 +189,9 @@ export default function App() {
 
   const safeRun = useCallback(
     (fn) => {
-      fn().catch((e) => showToast(String(e.message || e), "coral"));
+      fn().catch((e) => showError(e));
     },
-    [showToast]
+    [showError]
   );
 
   const contracts = [];
@@ -251,8 +260,39 @@ export default function App() {
       <Sidebar page={page} onNavigate={setPage} health={health} />
       <div className="min-w-0 flex-1">
         <Topbar page={page} health={health} onNavigate={setPage} />
+        {everFailed && !health && (
+          <div className="border-b border-sun/40 bg-sun-100 px-5 py-2.5 text-center text-xs font-semibold text-sun-ink sm:px-8">
+            Backend waking up — free-tier hosts sleep when idle and can take 30-60s to respond.
+            Retrying automatically every 12s; data appears the moment it answers.
+          </div>
+        )}
         <main className="mx-auto max-w-6xl px-5 py-8 sm:px-8">{pages[page]}</main>
       </div>
+
+      {errorPanel && (
+        <div className="fade-up fixed bottom-6 left-6 z-50 max-w-sm rounded-2xl border border-coral/40 bg-coral-100 p-4 shadow-card">
+          <p className="text-xs font-bold uppercase tracking-wide text-coral-ink">Action failed</p>
+          <p className="mt-1.5 break-words text-xs leading-relaxed text-coral-ink/90">{errorPanel}</p>
+          <p className="mt-1.5 text-[11px] leading-relaxed text-coral-ink/70">
+            On free-tier hosting the first request can take up to a minute while the API wakes up.
+            Funds are only ever reserved after a successful authorization.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              className="btn-plum !px-3 !py-1.5 text-xs"
+              onClick={() => {
+                setErrorPanel(null);
+                refreshData();
+              }}
+            >
+              Retry connection
+            </button>
+            <button className="btn-ghost !px-3 !py-1.5 text-xs" onClick={() => setErrorPanel(null)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div
