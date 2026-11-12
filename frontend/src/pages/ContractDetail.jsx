@@ -47,7 +47,7 @@ export default function ContractDetail() {
       setSubmissions(s.submissions || []);
       setError(null);
     } catch (err) {
-      setError(String(err.message || err));
+      setError({ message: String(err.message || err), status: err.status });
     } finally {
       setLoading(false);
     }
@@ -81,11 +81,16 @@ export default function ContractDetail() {
   }
 
   if (error || !contract) {
+    const notFound = error?.status === 404;
     return (
       <EmptyState
         icon={ShieldCheck}
-        title={error ? "Could not load contract" : "Contract not found"}
-        body={error || `No contract with id ${id} exists on this server. It may belong to a different deployment, or the backend restarted with a cleared database.`}
+        title={notFound ? "Contract not found" : "Could not load contract"}
+        body={
+          notFound
+            ? `No contract with id ${id} exists on this server. It may belong to a different deployment, or the backend database is fresh.`
+            : error?.message || "Unknown error"
+        }
         action={<Link className="btn-volt" to="/dashboard">Back to dashboard</Link>}
       />
     );

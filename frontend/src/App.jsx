@@ -25,9 +25,9 @@ function RequireAuth({ children, role }) {
 export default function App() {
   return (
     <Routes>
+      <Route path="/" element={<Landing />} />
+      <Route path="/login" element={<Login />} />
       <Route element={<Shell />}>
-        <Route path="/" element={<Landing />} />
-        <Route path="/login" element={<Login />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/contracts" element={<Contracts />} />
         <Route path="/contracts/new" element={<Wizard />} />

@@ -37,6 +37,14 @@ The UI labels every escrow state accordingly ("Escrow active — funds reserved"
 
 Every claim below maps to code and tests:
 
+- **A real, multi-user website** — accounts (register/login/logout-everywhere, scrypt
+  passwords, hashed session tokens), a hirer wizard (task → criteria → tests with a
+  sandbox dry-run → review → fund), a worker open board + workspace (accept, submit,
+  remediation resubmit), per-contract URLs with timelines/receipts/audit trails,
+  role-aware dashboards, settings, a notification bell, and a logged-out landing page.
+  `REQUIRE_AUTH=true` enforces bearer tokens on business routes; ownership scoping is
+  the next roadmap step.
+
 - **Escrow lifecycle** — Orders `AUTHORIZE` → `authorize` → `capture` / partial `capture` / `void`,
   with OAuth token caching, `PayPal-Request-Id` + `Idempotency-Key` idempotency headers,
   automatic retries with backoff on transient failures (network, 5xx, 429), and a failure

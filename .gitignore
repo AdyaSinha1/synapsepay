@@ -10,3 +10,7 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+e2e_test.db*
+e2e_persist_*.db*
+test-results/
+playwright-report/

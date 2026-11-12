@@ -12,6 +12,7 @@ import {
   getMetrics,
   getRecentEvents,
   getScenarios,
+  getUser,
   loginAccount,
   logoutAccount,
   registerAccount,
