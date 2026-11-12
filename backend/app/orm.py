@@ -115,3 +115,18 @@ class LogRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     line: Mapped[str] = mapped_column(Text)
+
+
+class AuthThrottleRow(Base):
+    """Login/register attempt records for the DB-backed throttle.
+
+    Survives restarts and is shared by every worker, unlike the in-memory
+    request limiter."""
+
+    __tablename__ = "auth_throttle"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ip: Mapped[str] = mapped_column(String(64), index=True)
+    route: Mapped[str] = mapped_column(String(32))
+    ok: Mapped[bool] = mapped_column(default=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
 import json
+import logging
 import re
 import time
+import traceback
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -52,6 +54,10 @@ from .models import (
     deadline_from_hours,
 )
 from .paypal_client import PayPalError
+from .obs import RequestLoggingMiddleware, SecurityHeadersMiddleware
+
+logger = logging.getLogger("synapsepay")
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 app_kwargs = {}
 if not config.DOCS_ENABLED:
@@ -111,6 +117,8 @@ app.add_middleware(
     allow_headers=config.CORS_HEADERS,
 )
 app.include_router(auth_router)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
 
 
 class RateLimitMiddleware:
@@ -204,6 +212,21 @@ def _validate_create(req: ContractCreateRequest) -> list[str]:
     return errors
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+    """No stack traces to clients: full detail goes to the server log, the
+    response carries only a request id for correlation."""
+    request_id = getattr(request.state, "request_id", "")
+    logger.error(json.dumps({
+        "level": "error",
+        "request_id": request_id,
+        "path": request.url.path,
+        "error": f"{type(exc).__name__}: {exc}",
+        "traceback": traceback.format_exc(limit=6),
+    }))
+    return JSONResponse(status_code=500, content={"detail": "internal server error", "request_id": request_id})
+
+
 @app.get("/")
 async def root() -> dict:
     return {"service": "SynapsePay", "version": config.APP_VERSION, "health": "/api/health"}
@@ -275,11 +298,31 @@ async def metrics() -> dict:
     return compute_metrics()
 
 
+def _enforce_open_contract_cap(user) -> None:
+    """Per-user cap on open contracts when signed in; a global cap otherwise."""
+    open_states = ("DRAFT", "FUNDED", "ACCEPTED", "SUBMITTED", "ARBITRATING", "REMEDIATION")
+    if user is not None:
+        owned_open = sum(
+            1 for c in CONTRACTS.values()
+            if c.owner_id == user.id and c.state in open_states
+        )
+        if owned_open >= config.OPEN_CONTRACT_CAP:
+            raise HTTPException(
+                status_code=429,
+                detail=f"open-contract cap reached ({config.OPEN_CONTRACT_CAP}) — settle, cancel or expire a contract first",
+            )
+    else:
+        total_open = sum(1 for e in ESCROWS.values() if e.status in open_states)
+        if total_open >= config.OPEN_CONTRACT_CAP * 4:
+            raise HTTPException(status_code=429, detail="server demo capacity reached — try again later")
+
+
 @app.post("/api/contracts/create")
-async def create_contract(req: ContractCreateRequest, _user=Depends(require_user)) -> dict:
+async def create_contract(req: ContractCreateRequest, user=Depends(require_user)) -> dict:
     errors = _validate_create(req)
     if errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
+    _enforce_open_contract_cap(user)
     contract = TaskContract(
         title=req.title.strip(),
         description=req.description[:2000],
@@ -290,6 +333,7 @@ async def create_contract(req: ContractCreateRequest, _user=Depends(require_user
         test_code=req.test_code,
         worker_code=req.worker_code,
         timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
+        owner_id=(user.id if user else ""),
     )
     contract.arbiter_weights = {
         "tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM,
@@ -463,10 +507,11 @@ async def arbitrate_contract(contract_id: str, _user=Depends(require_user)) -> d
 
 
 @app.post("/api/contracts/draft")
-async def create_draft_contract(req: ContractCreateRequest, _user=Depends(require_user)) -> dict:
+async def create_draft_contract(req: ContractCreateRequest, user=Depends(require_user)) -> dict:
     errors = _validate_create(req)
     if errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
+    _enforce_open_contract_cap(user)
     contract = TaskContract(
         title=req.title.strip(),
         description=req.description[:2000],
@@ -478,6 +523,7 @@ async def create_draft_contract(req: ContractCreateRequest, _user=Depends(requir
         worker_code=req.worker_code,
         timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
         state="DRAFT",
+        owner_id=(user.id if user else ""),
     )
     contract.arbiter_weights = {
         "tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM,

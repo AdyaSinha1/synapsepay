@@ -7,7 +7,7 @@ import { fmtUSD, getContract, getContractEvaluations } from "../api.js";
 
 export default function Workspace() {
   const { id } = useParams();
-  const { showError, showToast } = useApp();
+  const { showError, showToast, runArbitration } = useApp();
   const [contract, setContract] = useState(null);
   const [code, setCode] = useState("");
   const [error, setError] = useState(null);
@@ -40,23 +40,15 @@ export default function Workspace() {
     setBusy(true);
     setError(null);
     try {
-      await getContract(id);
-      const res = await getContractEvaluations(id).catch(() => ({ evaluations: [] }));
-      const rounds = res.evaluations?.length || 0;
-      const latest = res.evaluations?.[rounds - 1];
-      const isRemediation = latest?.decision === "VOID" && rounds === 1 && latest.composite >= 0.7;
-      if (isRemediation) {
-        showToast("Remediation resubmission recorded — running the arbiter again", "lilac");
-      }
-      const arb = await getContract(id);
-      setContract(arb);
-      const arbitrateRes = await import("../api.js").then((m) => m.arbitrate(id));
+      const arbitrateRes = await runArbitration(id, code);
       setResult(arbitrateRes);
       await load();
-      if (arbitrateRes.evaluation?.decision === "CAPTURE") {
-        showToast(`Captured — ${arbitrateRes.receipt?.transaction_id}`, "volt");
-      } else if (arbitrateRes.escrow?.status === "REMEDIATION") {
+      if (arbitrateRes.escrow?.status === "REMEDIATION") {
         showToast("Near-miss verdict: remediation round opened — fix the failing tests and resubmit", "lilac");
+      } else if (arbitrateRes.evaluation?.decision === "CAPTURE") {
+        showToast(`Captured — ${arbitrateRes.receipt?.transaction_id}`, "volt");
+      } else if (arbitrateRes.evaluation?.decision === "PARTIAL") {
+        showToast("Partial capture — scheduled fraction paid, remainder released", "lilac");
       } else {
         showToast("Verdict: VOID — hirer refunded", "coral");
       }

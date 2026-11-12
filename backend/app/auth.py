@@ -15,19 +15,25 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import config
 from .database import get_db
-from .orm import SessionRow, UserRow
+from .orm import AuthThrottleRow, SessionRow, UserRow
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 USERNAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 MIN_PASSWORD_LEN = 8
+LOGIN_THROTTLE_LIMIT = getattr(config, "LOGIN_THROTTLE_LIMIT", 10)
+LOGIN_THROTTLE_WINDOW_MIN = 15
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 class RegisterRequest(BaseModel):
@@ -114,21 +120,24 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 def require_user(authorization: str | None = Header(default=None), session: Session = Depends(get_db)):
-    """Guard for business routes. With REQUIRE_AUTH=false it is a no-op so the
-    public demo keeps working; with true it demands a valid bearer token."""
-    if not config.REQUIRE_AUTH:
-        return None
+    """Optional-auth guard: resolves the caller when a valid bearer token is
+    present (ownership, caps), and enforces authentication only when
+    REQUIRE_AUTH=true — keeping the public demo usable without accounts."""
     token = _bearer_token(authorization)
     if not token:
-        raise HTTPException(status_code=401, detail="authentication required: set REQUIRE_AUTH context or pass a bearer token")
+        if config.REQUIRE_AUTH:
+            raise HTTPException(status_code=401, detail="authentication required: sign in and pass a bearer token")
+        return None
     user = authenticate_token(token, session)
     if user is None:
-        raise HTTPException(status_code=401, detail="invalid or expired session token")
+        if config.REQUIRE_AUTH:
+            raise HTTPException(status_code=401, detail="invalid or expired session token")
+        return None
     return user
 
 
 @router.post("/register", status_code=201)
-def register(req: RegisterRequest, session: Session = Depends(get_db)) -> dict:
+def register(req: RegisterRequest, request: Request, session: Session = Depends(get_db)) -> dict:
     username = req.username.strip()
     if not (3 <= len(username) <= 32) or not set(username) <= USERNAME_CHARS:
         raise HTTPException(status_code=422, detail="username must be 3-32 chars (letters, digits, _ or -)")
@@ -151,10 +160,34 @@ def register(req: RegisterRequest, session: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/login")
-def login(req: LoginRequest, session: Session = Depends(get_db)) -> dict:
+def login(req: LoginRequest, request: Request, session: Session = Depends(get_db)) -> dict:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LOGIN_THROTTLE_WINDOW_MIN)
+    ip = _client_ip(request)
+    failed = (
+        session.scalar(
+            select(func.count())
+            .select_from(AuthThrottleRow)
+            .where(
+                AuthThrottleRow.ip == ip,
+                AuthThrottleRow.route == "login",
+                AuthThrottleRow.ok.is_(False),
+                AuthThrottleRow.ts > cutoff,
+            )
+        )
+        or 0
+    )
+    if failed >= config.LOGIN_THROTTLE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many failed logins — try again in {LOGIN_THROTTLE_WINDOW_MIN} minutes",
+        )
     row = session.scalars(select(UserRow).where(UserRow.username == req.username.strip())).first()
     if row is None or not _verify_password(req.password, row.password_hash):
+        session.add(AuthThrottleRow(ip=ip, route="login", ok=False))
+        session.commit()
         raise HTTPException(status_code=401, detail="invalid username or password")
+    session.add(AuthThrottleRow(ip=ip, route="login", ok=True))
+    session.commit()
     token, expires = _create_session(session, row.id)
     return {"user": _public_user(row), "token": token, "expires_at": expires}
 
