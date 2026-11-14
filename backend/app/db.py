@@ -47,15 +47,26 @@ def _session_factory():
 
 
 def init(path: str | None = None) -> bool:
-    """Bind the repository to the configured (or test-provided) database."""
+    """Bind the repository to the configured (or test-provided) database.
+
+    When DATABASE_URL points at a managed database (Postgres), Alembic runs
+    first so the schema is always migrated; create_all stays as a safety net
+    for fresh SQLite dev databases. A SQLite deployment also gets a small
+    startup backup (last 3 copies) since its disk is ephemeral on redeploys.
+    """
     global _engine, _sessionmaker
     if not config.PERSISTENCE_ENABLED:
         return False
     try:
+        managed = bool((config.DATABASE_URL or "").strip())
         url = _sqlite_url_from_path(path) if path else None
         _engine = make_engine(url)
         _sessionmaker = _session_factory()
+        if managed and path is None:
+            _run_migrations(make_engine(None).url.render_as_string(hide_password=False))
         Base.metadata.create_all(_engine)
+        if path is None and _is_sqlite(make_engine(url).url.render_as_string(hide_password=False)):
+            _backup_sqlite((config.DATABASE_PATH or "synapsepay.db"))
         # Rebind the shared session factory so every consumer (auth, routes)
         # talks to the same active database as this repository.
         database_module.engine = _engine
@@ -65,6 +76,32 @@ def init(path: str | None = None) -> bool:
         _engine = None
         _sessionmaker = None
         return False
+
+
+def _run_migrations(url: str) -> None:
+    try:
+        from alembic import command
+        from alembic.config import Config as AlembicConfig
+
+        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        cfg = AlembicConfig(os.path.join(pkg_dir, "..", "alembic.ini"))
+        cfg.set_main_option("script_location", os.path.join(pkg_dir, "..", "migrations"))
+        cfg.set_main_option("sqlalchemy.url", url)
+        command.upgrade(cfg, "head")
+    except Exception:
+        pass  # fresh/dev databases fall back to create_all below
+
+
+def _backup_sqlite(path: str, keep: int = 3) -> None:
+    try:
+        backup_dir = os.path.join(os.path.dirname(os.path.abspath(path)) or ".", "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(path, os.path.join(backup_dir, f"synapsepay-{stamp}.db"))
+        for old in sorted(glob.glob(os.path.join(backup_dir, "synapsepay-*.db")))[:-keep]:
+            os.remove(old)
+    except Exception:
+        pass
 
 
 def close() -> None:
@@ -177,6 +214,30 @@ def load_all() -> dict:
         ]
     out["events"].reverse()
     return out
+
+
+def claim_acceptance(contract_id: str, worker_id: str) -> bool:
+    """Atomic row-level claim: exactly one concurrent worker moves a FUNDED
+    contract into ACCEPTED. Returns False for the losers of the race."""
+    if _sessionmaker is None:
+        return True
+    with _sessionmaker.begin() as session:
+        row = session.execute(
+            select(ContractRow).where(ContractRow.id == contract_id)
+        ).scalar_one_or_none()
+        if row is None:
+            return True
+        if row.state != "FUNDED":
+            return False
+        data = dict(row.data or {})
+        data["state"] = "ACCEPTED"
+        data["worker_id"] = worker_id
+        result = session.execute(
+            update(ContractRow)
+            .where(ContractRow.id == contract_id, ContractRow.state == "FUNDED")
+            .values(state="ACCEPTED", data=data)
+        )
+        return result.rowcount == 1
 
 
 def claim_arbitration(contract_id: str) -> bool:

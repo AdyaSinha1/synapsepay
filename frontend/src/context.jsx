@@ -20,7 +20,7 @@ import {
   submitDeliverable,
   zipContracts,
 } from "./api.js";
-import { clearSession, getSession } from "./auth.js";
+import { clearSession, getSession, getToken } from "./auth.js";
 
 const AppContext = createContext(null);
 
@@ -100,6 +100,10 @@ export function AppProvider({ children }) {
     let ws;
     const connect = () => {
       ws = new WebSocket(`${API_BASE.replace(/^http/, "ws")}/ws/events`);
+      ws.addEventListener("open", () => {
+        const token = getToken();
+        if (token) ws.send(JSON.stringify({ token }));
+      });
       ws.onmessage = (e) => {
         try {
           const evt = JSON.parse(e.data);

@@ -20,9 +20,11 @@ from .agent_simulator import (
     DELIVERABLES,
     ESCROWS,
     EVALUATIONS,
+    EVENT_LOG,
     SCENARIOS,
     compute_metrics,
     paypal,
+    register_contract_party,
     restore_from_disk,
     run_full_cycle,
     scenario_summary,
@@ -39,6 +41,7 @@ from .lifecycle import (
     reauthorize_escrow,
     start_funding,
 )
+from .ownership import party_or_404, require_role, visible_contract_ids, event_visible_to
 from .models import (
     AcceptRequest,
     ContractCreateRequest,
@@ -168,18 +171,25 @@ app.add_middleware(RateLimitMiddleware)
 
 class EventBus:
     def __init__(self) -> None:
-        self.clients: set[WebSocket] = set()
+        self.clients: set[tuple[WebSocket, str]] = set()
 
     async def broadcast(self, event: dict) -> None:
+        from .ownership import event_visible_to
+        from .agent_simulator import USER_CONTRACTS
+
         payload = json.dumps(event, default=str)
-        dead: list[WebSocket] = []
-        for ws in list(self.clients):
+        dead: list[tuple[WebSocket, str]] = []
+        for client in list(self.clients):
+            ws, user_id = client
+            contract_ids = USER_CONTRACTS.get(user_id, set())
+            if not event_visible_to(event, contract_ids):
+                continue
             try:
                 await ws.send_text(payload)
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.clients.discard(ws)
+                dead.append(client)
+        for client in dead:
+            self.clients.discard(client)
 
 
 bus = EventBus()
@@ -245,6 +255,7 @@ async def health() -> dict:
         "gemini_mode": config.GEMINI_MODE,
         "active_contracts": len(CONTRACTS),
         "persistence": "sqlite" if db_enabled() else "memory",
+        "storage": "postgres" if config.DATABASE_URL.strip() else "ephemeral",
         "sandbox": {
             "backend": "docker" if docker_available() else "native",
             "docker_available": docker_available(),
@@ -334,6 +345,7 @@ async def create_contract(req: ContractCreateRequest, user=Depends(require_user)
         worker_code=req.worker_code,
         timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
         owner_id=(user.id if user else ""),
+        hirer_id=(user.id if user else ""),
     )
     contract.arbiter_weights = {
         "tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM,
@@ -360,6 +372,8 @@ async def create_contract(req: ContractCreateRequest, user=Depends(require_user)
     )
     CONTRACTS[contract.id] = contract
     ESCROWS[contract.id] = escrow
+    if user is not None:
+        register_contract_party(user.id, contract.id)
 
     from . import db
 
@@ -375,12 +389,14 @@ async def create_contract(req: ContractCreateRequest, user=Depends(require_user)
 
 
 @app.post("/api/contracts/execute-demo")
-async def execute_demo(req: ExecuteDemoRequest, _user=Depends(require_user)) -> dict:
+async def execute_demo(req: ExecuteDemoRequest, user=Depends(require_user)) -> dict:
     try:
         if req.contract_id:
+            if user is None:
+                raise HTTPException(status_code=401, detail="authentication required to run a specific contract")
+            party_or_404(req.contract_id, user)
+            require_role(user, CONTRACTS[req.contract_id], "hirer", "re-run this contract")
             contract = CONTRACTS.get(req.contract_id)
-            if contract is None:
-                raise HTTPException(status_code=404, detail=f"unknown contract: {req.contract_id}")
             return await run_full_cycle(contract=contract, broadcast=bus.broadcast)
         if not req.scenario_id:
             raise HTTPException(status_code=422, detail="provide scenario_id or contract_id")
@@ -394,20 +410,19 @@ async def execute_demo(req: ExecuteDemoRequest, _user=Depends(require_user)) -> 
 
 
 @app.get("/api/contracts")
-async def list_contracts() -> dict:
+async def list_contracts(user=Depends(require_user)) -> dict:
     await sweep_expired()
+    visible = visible_contract_ids(user)
     return {
-        "contracts": [c.model_dump() for c in CONTRACTS.values()],
-        "escrows": [e.model_dump() for e in ESCROWS.values()],
+        "contracts": [c.model_dump() for c in CONTRACTS.values() if c.id in visible],
+        "escrows": [e.model_dump() for e in ESCROWS.values() if e.contract_id in visible],
     }
 
 
 @app.get("/api/contracts/{contract_id}")
-async def get_contract(contract_id: str) -> dict:
+async def get_contract(contract_id: str, user=Depends(require_user)) -> dict:
     await sweep_expired()
-    contract = CONTRACTS.get(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+    contract = party_or_404(contract_id, user)
     escrow = ESCROWS.get(contract_id)
     deliverable = DELIVERABLES.get(contract_id)
     return {
@@ -418,9 +433,8 @@ async def get_contract(contract_id: str) -> dict:
 
 
 @app.get("/api/contracts/{contract_id}/evaluations")
-async def contract_evaluations(contract_id: str) -> dict:
-    if contract_id not in CONTRACTS:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def contract_evaluations(contract_id: str, user=Depends(require_user)) -> dict:
+    party_or_404(contract_id, user)
     return {
         "contract_id": contract_id,
         "evaluations": EVALUATIONS.get(contract_id, []),
@@ -429,10 +443,9 @@ async def contract_evaluations(contract_id: str) -> dict:
 
 
 @app.post("/api/contracts/{contract_id}/submit")
-async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest, _user=Depends(require_user)) -> dict:
-    contract = CONTRACTS.get(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest, user=Depends(require_user)) -> dict:
+    contract = party_or_404(contract_id, user)
+    require_role(user, contract, "worker", "submit deliverables")
     escrow = ESCROWS.get(contract_id)
     if escrow is not None and escrow.status not in ("AUTHORIZED", "REMEDIATION"):
         detail = "arbitration in progress" if escrow.status == "ARBITRATING" else f"contract already settled ({escrow.status})"
@@ -465,10 +478,8 @@ async def submit_deliverable(contract_id: str, req: SubmitDeliverableRequest, _u
 
 
 @app.post("/api/contracts/{contract_id}/arbitrate")
-async def arbitrate_contract(contract_id: str, _user=Depends(require_user)) -> dict:
-    contract = CONTRACTS.get(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def arbitrate_contract(contract_id: str, user=Depends(require_user)) -> dict:
+    contract = party_or_404(contract_id, user)
     escrow = ESCROWS.get(contract_id)
     if escrow is None or escrow.status not in ("AUTHORIZED", "REMEDIATION"):
         if escrow is not None and escrow.status == "ARBITRATING":
@@ -532,6 +543,8 @@ async def create_draft_contract(req: ContractCreateRequest, user=Depends(require
         req.deadline_hours, config.DEADLINE_HOURS_DEFAULT, config.DEADLINE_HOURS_MAX
     )
     CONTRACTS[contract.id] = contract
+    if user is not None:
+        register_contract_party(user.id, contract.id)
 
     from . import db
 
@@ -545,10 +558,9 @@ async def create_draft_contract(req: ContractCreateRequest, user=Depends(require
 
 
 @app.post("/api/contracts/{contract_id}/fund/start")
-async def fund_start(contract_id: str, _user=Depends(require_user)) -> dict:
-    contract = CONTRACTS.get(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def fund_start(contract_id: str, user=Depends(require_user)) -> dict:
+    contract = party_or_404(contract_id, user)
+    require_role(user, contract, "hirer", "fund contracts")
     try:
         started = await start_funding(contract)
     except ValueError as exc:
@@ -565,10 +577,9 @@ async def fund_start(contract_id: str, _user=Depends(require_user)) -> dict:
 
 
 @app.post("/api/contracts/{contract_id}/fund/complete")
-async def fund_complete(contract_id: str, body: FundCompleteRequest, _user=Depends(require_user)) -> dict:
-    contract = CONTRACTS.get(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def fund_complete(contract_id: str, body: FundCompleteRequest, user=Depends(require_user)) -> dict:
+    contract = party_or_404(contract_id, user)
+    require_role(user, contract, "hirer", "fund contracts")
     try:
         escrow = await complete_funding(contract, body.order_id)
     except ValueError as exc:
@@ -583,10 +594,9 @@ async def fund_complete(contract_id: str, body: FundCompleteRequest, _user=Depen
 
 
 @app.post("/api/contracts/{contract_id}/reauthorize")
-async def reauthorize_contract(contract_id: str, _user=Depends(require_user)) -> dict:
-    contract = CONTRACTS.get(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def reauthorize_contract(contract_id: str, user=Depends(require_user)) -> dict:
+    contract = party_or_404(contract_id, user)
+    require_role(user, contract, "hirer", "re-authorize the escrow")
     escrow = ESCROWS.get(contract_id)
     if escrow is None:
         raise HTTPException(status_code=409, detail="contract has no escrow to re-authorize")
@@ -617,9 +627,11 @@ async def sandbox_preview(req: SandboxPreviewRequest, _user=Depends(require_user
 
 
 @app.get("/api/events/recent")
-async def recent_events(limit: int = 40) -> dict:
+async def recent_events(limit: int = 40, user=Depends(require_user)) -> dict:
     capped = max(1, min(int(limit), 200))
-    return {"events": list(reversed(EVENT_LOG[-capped:]))}
+    visible = visible_contract_ids(user)
+    own = [e for e in EVENT_LOG if event_visible_to(e, visible)]
+    return {"events": list(reversed(own[-capped:]))}
 
 
 @app.get("/api/paypal/config")
@@ -633,9 +645,8 @@ async def paypal_config() -> dict:
 
 
 @app.get("/api/contracts/{contract_id}/submissions")
-async def contract_submissions(contract_id: str) -> dict:
-    if contract_id not in CONTRACTS:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def contract_submissions(contract_id: str, user=Depends(require_user)) -> dict:
+    party_or_404(contract_id, user)
     submissions = []
     from . import db
 
@@ -649,21 +660,28 @@ async def contract_submissions(contract_id: str) -> dict:
 
 @app.post("/api/contracts/{contract_id}/accept")
 async def accept_contract(contract_id: str, req: AcceptRequest, user=Depends(require_user)) -> dict:
+    if user is None:
+        raise HTTPException(status_code=401, detail="sign in as a worker to accept contracts")
     contract = CONTRACTS.get(contract_id)
     if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+        raise HTTPException(status_code=404, detail="not found")
     escrow = ESCROWS.get(contract_id)
     if escrow is None or escrow.status != "AUTHORIZED":
         raise HTTPException(status_code=409, detail="only contracts with an active escrow can be accepted")
     if contract.state != "FUNDED":
         raise HTTPException(status_code=409, detail=f"contract state is {contract.state}, not FUNDED")
 
+    from .db import claim_acceptance
     from .state_machine import require_transition
 
+    worker_name = req.worker.strip() or user.username
+    if not claim_acceptance(contract_id, user.id):
+        raise HTTPException(status_code=409, detail="another worker already claimed this contract")
     require_transition("FUNDED", "ACCEPTED")
     contract.state = "ACCEPTED"
-    worker_name = req.worker.strip() or (user.username if user is not None else "worker-agent-b")
     contract.worker = worker_name[:64]
+    contract.worker_id = user.id
+    register_contract_party(user.id, contract_id)
 
     from . import db
 
@@ -677,10 +695,8 @@ async def accept_contract(contract_id: str, req: AcceptRequest, user=Depends(req
 
 
 @app.post("/api/contracts/{contract_id}/dispute")
-async def dispute_contract(contract_id: str, req: DisputeRequest, _user=Depends(require_user)) -> dict:
-    contract = CONTRACTS.get(contract_id)
-    if contract is None:
-        raise HTTPException(status_code=404, detail=f"unknown contract: {contract_id}")
+async def dispute_contract(contract_id: str, req: DisputeRequest, user=Depends(require_user)) -> dict:
+    contract = party_or_404(contract_id, user)
     escrow = ESCROWS.get(contract_id)
     if escrow is None or escrow.status not in ("AUTHORIZED", "REMEDIATION"):
         raise HTTPException(status_code=409, detail="disputes require an active escrow")
@@ -753,23 +769,72 @@ async def resolve_dispute(contract_id: str, req: DisputeResolveRequest, _user=De
     return {"contract_id": contract_id, "state": "VOIDED", "note": "dispute resolved — hold released to the hirer"}
 
 
+@app.post("/api/contracts/{contract_id}/cancel")
+async def cancel_contract(contract_id: str, user=Depends(require_user)) -> dict:
+    contract = party_or_404(contract_id, user)
+    require_role(user, contract, "hirer", "cancel contracts")
+    escrow = ESCROWS.get(contract_id)
+    if contract.state not in ("DRAFT", "FUNDED"):
+        raise HTTPException(status_code=409, detail=f"contract state is {contract.state}, cannot cancel")
+
+    from .state_machine import require_transition
+
+    if escrow is not None and escrow.status == "AUTHORIZED":
+        try:
+            await paypal.void_authorization(escrow.authorization_id)
+        except PayPalError as exc:
+            if exc.kind not in ("expired", "voided"):
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+        require_transition("FUNDED", "CANCELLED")
+        escrow.status = "VOIDED"
+        from . import db
+
+        db.save_escrow(escrow.model_dump())
+    require_transition("DRAFT", "CANCELLED") if contract.state == "DRAFT" else require_transition("FUNDED", "CANCELLED")
+    contract.state = "CANCELLED"
+
+    from . import db
+
+    db.save_contract(contract.model_dump())
+    return {"contract_id": contract_id, "state": "CANCELLED", "note": "any hold was released; no money moved"}
+
+
 @app.post("/api/maintenance/sweep")
 async def maintenance_sweep(_user=Depends(require_user)) -> dict:
     swept = await sweep_expired()
     return {"swept": swept, "count": len(swept)}
 
 
-@app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket) -> None:
+    """First frame must be {"token": "..."}; only the caller's own contract
+    events are delivered afterwards."""
+    logger.info(json.dumps({"level": "debug", "ws": "endpoint-entered"}))
     await websocket.accept()
-    bus.clients.add(websocket)
+    try:
+        frame = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=10))
+        token = str(frame.get("token", ""))
+    except Exception as exc:
+        logger.info(json.dumps({"level": "debug", "ws": "auth-rejected", "error": f"{type(exc).__name__}: {exc}"}))
+        await websocket.close(code=1008)
+        return
+
+    from .auth import authenticate_token
+    from .database import SessionLocal
+
+    with SessionLocal() as session:
+        user = authenticate_token(token, session)
+    if user is None:
+        await websocket.close(code=1008)
+        return
+
+    bus.clients.add((websocket, user.id))
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
-        bus.clients.discard(websocket)
+        bus.clients.discard((websocket, user.id))
 
 
 if __name__ == "__main__":

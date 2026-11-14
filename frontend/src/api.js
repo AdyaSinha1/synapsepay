@@ -9,7 +9,17 @@ export async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const timeoutMs = options.timeout ?? 4000;
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (res.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+    setSession(null);
+    window.location.assign("/login");
+    throw new Error("Session expired — sign in again");
+  }
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
     try {
@@ -35,7 +45,7 @@ export const getContractSubmissions = (id) => api(`/api/contracts/${id}/submissi
 export const getRecentEvents = (limit = 40) => api(`/api/events/recent?limit=${limit}`);
 export const getPaypalConfig = () => api("/api/paypal/config");
 export const runDemo = (body) =>
-  api("/api/contracts/execute-demo", { method: "POST", body: JSON.stringify(body) });
+  api("/api/contracts/execute-demo", { method: "POST", body: JSON.stringify(body), timeout: 30000 });
 export const createContract = (body) =>
   api("/api/contracts/create", { method: "POST", body: JSON.stringify(body) });
 export const createDraft = (body) =>
@@ -52,7 +62,7 @@ export const submitDeliverable = (id, body) =>
   api(`/api/contracts/${id}/submit`, { method: "POST", body: JSON.stringify(body) });
 export const arbitrate = (id) => api(`/api/contracts/${id}/arbitrate`, { method: "POST" });
 export const sandboxPreview = (code, tests) =>
-  api("/api/sandbox/preview", { method: "POST", body: JSON.stringify({ code, tests }) });
+  api("/api/sandbox/preview", { method: "POST", body: JSON.stringify({ code, tests }), timeout: 15000 });
 
 export async function registerAccount(username, password, role, displayName = "") {
   const data = await api("/api/auth/register", {

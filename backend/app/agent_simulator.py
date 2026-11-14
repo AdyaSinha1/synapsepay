@@ -306,6 +306,19 @@ def build_deliverable(contract: TaskContract, worker_code: str | None = None) ->
     )
 
 
+USER_CONTRACTS: dict[str, set[str]] = {}
+
+
+def register_contract_party(user_id: str, contract_id: str) -> None:
+    """Track which contracts a websocket subscriber may receive events for."""
+    if user_id:
+        USER_CONTRACTS.setdefault(user_id, set()).add(contract_id)
+
+
+def parties_for(contract_id: str) -> set[str]:
+    return {uid for uid, cids in USER_CONTRACTS.items() if contract_id in cids}
+
+
 def _register_event(event: EventLogEntry) -> None:
     EVENT_LOG.append(event.model_dump())
     if len(EVENT_LOG) > MAX_LOG:
@@ -350,6 +363,7 @@ async def run_full_cycle(
         if scenario_id not in SCENARIOS:
             raise ValueError(f"unknown scenario: {scenario_id}")
         contract = build_contract_from_scenario(scenario_id)
+        contract.is_demo = True
     CONTRACTS[contract.id] = contract
     db.save_contract(contract.model_dump())
 
@@ -948,6 +962,11 @@ def restore_from_disk() -> dict:
             continue
     for cid, e in data.get("evaluations", []):
         EVALUATIONS.setdefault(cid, []).append(e)
+    for c in data.get("contracts", []):
+        if c.get("hirer_id"):
+            register_contract_party(c["hirer_id"], c["id"])
+        if c.get("worker_id"):
+            register_contract_party(c["worker_id"], c["id"])
     for r in data.get("runs", []):
         RUNS.append(r)
     for e in data.get("events", []):

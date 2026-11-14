@@ -5,6 +5,7 @@ recent-events feed, and account management (password change, logout-everywhere).
 from datetime import datetime, timezone
 
 import pytest
+import uuid
 
 from app import config
 
@@ -15,7 +16,6 @@ def test_accept_moves_funded_contract_to_accepted():
     from app.agent_simulator import CONTRACTS, ESCROWS, build_contract_from_scenario
     from app.main import app
     from app.models import EscrowRecord
-    from app.state_machine import canonical
 
     with TestClient(app) as client:
         contract = build_contract_from_scenario("A")
@@ -26,10 +26,19 @@ def test_accept_moves_funded_contract_to_accepted():
         CONTRACTS[contract.id] = contract
         ESCROWS[contract.id] = escrow
         try:
-            resp = client.post(f"/api/contracts/{contract.id}/accept", json={"worker": "worker-x"})
+            username = f"worker-{uuid.uuid4().hex[:8]}"
+            token = client.post("/api/auth/register", json={
+                "username": username, "password": "longenough1", "role": "worker",
+            }).json()["token"]
+            resp = client.post(
+                f"/api/contracts/{contract.id}/accept",
+                json={"worker": username},
+                headers={"Authorization": f"Bearer {token}"},
+            )
             assert resp.status_code == 200, resp.text
             assert resp.json()["contract"]["state"] == "ACCEPTED"
-            assert resp.json()["contract"]["worker"] == "worker-x"
+            assert resp.json()["contract"]["worker"] == username
+            assert resp.json()["contract"]["worker_id"]
         finally:
             CONTRACTS.pop(contract.id, None)
             ESCROWS.pop(contract.id, None)
@@ -49,8 +58,13 @@ def test_accept_rejects_draft_and_settled_contracts():
         settled.state = "SETTLED"
         CONTRACTS[settled.id] = settled
         try:
-            assert client.post(f"/api/contracts/{draft.id}/accept", json={}).status_code == 409
-            assert client.post(f"/api/contracts/{settled.id}/accept", json={}).status_code == 409
+            username = f"worker-{uuid.uuid4().hex[:8]}"
+            token = client.post("/api/auth/register", json={
+                "username": username, "password": "longenough1", "role": "worker",
+            }).json()["token"]
+            headers = {"Authorization": f"Bearer {token}"}
+            assert client.post(f"/api/contracts/{draft.id}/accept", json={}, headers=headers).status_code == 409
+            assert client.post(f"/api/contracts/{settled.id}/accept", json={}, headers=headers).status_code == 409
         finally:
             CONTRACTS.pop(draft.id, None)
             CONTRACTS.pop(settled.id, None)
@@ -120,3 +134,43 @@ def test_password_change_and_logout_everywhere():
 
         assert client.post("/api/auth/logout-all", headers=headers).status_code == 200
         assert client.get("/api/auth/me", headers=headers).status_code == 401
+
+
+def test_submit_requires_the_assigned_worker():
+    from fastapi.testclient import TestClient
+
+    from app.agent_simulator import CONTRACTS, build_contract_from_scenario
+    from app.main import app
+
+    with TestClient(app) as client:
+        contract = build_contract_from_scenario("A")
+        contract.state = "ACCEPTED"
+        contract.hirer_id = "hirer-1"
+        contract.worker_id = "worker-1"
+        CONTRACTS[contract.id] = contract
+        try:
+            # hirer-1 is a party, so the route answers 403 (worker-only action)
+            hirer_token = client.post("/api/auth/register", json={
+                "username": f"h-{uuid.uuid4().hex[:8]}", "password": "longenough1",
+            }).json()["token"]
+            hirer_id = client.get("/api/auth/me", headers={
+                "Authorization": f"Bearer {hirer_token}",
+            }).json()["user"]["id"]
+            CONTRACTS[contract.id].hirer_id = hirer_id
+
+            hirer = client.post(f"/api/contracts/{contract.id}/submit", json={
+                "artifact_type": "code", "code": "x = 1\n",
+            }, headers={"Authorization": f"Bearer {hirer_token}"})
+            assert hirer.status_code == 403
+            assert "assigned worker" in hirer.json()["detail"]
+
+            # a non-party gets the same 404 as an unknown contract
+            outsider_token = client.post("/api/auth/register", json={
+                "username": f"o-{uuid.uuid4().hex[:8]}", "password": "longenough1",
+            }).json()["token"]
+            outsider = client.post(f"/api/contracts/{contract.id}/submit", json={
+                "artifact_type": "code", "code": "x = 1\n",
+            }, headers={"Authorization": f"Bearer {outsider_token}"})
+            assert outsider.status_code == 404
+        finally:
+            CONTRACTS.pop(contract.id, None)

@@ -32,6 +32,9 @@ class TaskContract(BaseModel):
     worker_code: str = ""
     state: str = Field(default="FUNDED")
     owner_id: str = ""
+    hirer_id: str = ""
+    worker_id: str = ""
+    is_demo: bool = False
     terms_hash: str = ""
     dispute_reason: str = ""
     arbiter_weights: dict = Field(

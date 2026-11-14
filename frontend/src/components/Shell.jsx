@@ -33,6 +33,12 @@ export default function Shell() {
             Retrying automatically every 12s; data appears the moment it answers.
           </div>
         )}
+        {health?.storage === "ephemeral" && (
+          <div className="border-b border-coral/40 bg-coral-100 px-5 py-2.5 text-center text-xs font-semibold text-coral-ink sm:px-8">
+            Storage is temporary on this deployment. Data resets on redeploy — set DATABASE_URL to a
+            managed Postgres for durable storage.
+          </div>
+        )}
         <main className="mx-auto max-w-6xl px-4 pb-16 pt-6 sm:px-8 sm:pt-8">
           <Outlet />
         </main>
