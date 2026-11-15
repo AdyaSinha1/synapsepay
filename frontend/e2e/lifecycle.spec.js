@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { uid } from "./helpers.js";
 
+let hirerSession = null;
+
 const PASSING_SLUGIFY = `def slugify(text):
     """Convert a title into a URL slug."""
     return '-'.join(text.lower().strip().split())
@@ -35,6 +37,7 @@ async function createFundedContract(page, title) {
   await page.getByRole("button", { name: /Fund \(simulated\)/ }).click();
   await expect(page).toHaveURL(/\/contracts\/[a-f0-9]+$/, { timeout: 30_000 });
   await expect(page.getByText("Funds are RESERVED")).toBeVisible();
+  hirerSession = await page.evaluate(() => localStorage.getItem("synapsepay_session"));
   return page.url().split("/").pop();
 }
 
@@ -66,18 +69,23 @@ test.describe.serial("full contract lifecycle", () => {
   });
 
   test("both parties see the settled receipt on the contract page", async ({ page }) => {
+    // each Playwright test gets a fresh context: restore the hirer session
+    await page.addInitScript(
+      ([session]) => localStorage.setItem("synapsepay_session", session),
+      [hirerSession],
+    );
     await page.goto(`/contracts/${contractId}`);
-    await expect(page.getByText("Captured").first()).toBeVisible();
+    await expect(page.getByText("Captured").first()).toBeVisible({ timeout: 15000 });
     await expect(page.getByText("Receipt")).toBeVisible();
     await expect(page.getByText(/The capture completed the charge/)).toBeVisible();
   });
 
-  test("a third account can view it, but a bogus id renders not-found", async ({ browser }) => {
+  test("a third account gets not-found on someone else's contract and on a bogus id", async ({ browser }) => {
     const context = await browser.newContext();
     const page = await context.newPage();
     await register(page, "hirer");
     await page.goto(`/contracts/${contractId}`);
-    await expect(page.getByText("Captured").first()).toBeVisible();
+    await expect(page.getByText("Contract not found")).toBeVisible();
 
     await page.goto("/contracts/doesnotexist99");
     await expect(page.getByText("Contract not found")).toBeVisible();

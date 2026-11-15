@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Bot, Loader2, Search } from "lucide-react";
 import { useApp } from "../context.jsx";
@@ -6,14 +6,16 @@ import { Chip, EmptyState, PageIntro, StatusChip } from "../components/ui.jsx";
 import { fmtUSD } from "../api.js";
 
 export default function Board() {
-  const { contracts, acceptAction, user, running, showError } = useApp();
+  const { openBoard, acceptAction, user, running, showError, refreshData } = useApp();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [busyId, setBusyId] = useState(null);
 
-  const open = contracts
-    .filter((c) => c.escrow?.status === "AUTHORIZED" && (c.state || "FUNDED") === "FUNDED")
-    .filter((c) => !user || c.worker !== user.username)
+  useEffect(() => {
+    refreshData();
+  }, [refreshData]);
+
+  const open = openBoard
     .filter((c) => c.title.toLowerCase().includes(query.toLowerCase()));
 
   const accept = async (c) => {

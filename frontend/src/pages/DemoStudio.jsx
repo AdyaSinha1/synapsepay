@@ -23,7 +23,7 @@ export default function DemoStudio() {
     <div className="space-y-6">
       <PageIntro
         title="Demo Studio"
-        sub="Three pre-built contracts with known outcomes. Run one and watch escrow lock, work execute, and the arbiter decide — live."
+        sub="Three pre-built contracts with known outcomes. All runs are Demo (simulated) — no real funds. Watch escrow lock, work execute, and the arbiter decide, live."
       />
 
       <div className="grid gap-4 lg:grid-cols-3">

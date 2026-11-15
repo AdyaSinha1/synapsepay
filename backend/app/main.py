@@ -132,6 +132,7 @@ class RateLimitMiddleware:
         self.app = app
         self._general: dict[str, deque] = {}
         self._arbitrate: dict[str, deque] = {}
+        self._demo: dict[str, deque] = {}
 
     def _hit(self, bucket: dict, key: str, limit: int, now: float) -> bool:
         q = bucket.setdefault(key, deque())
@@ -153,6 +154,9 @@ class RateLimitMiddleware:
         if path.endswith("/arbitrate"):
             ok = self._hit(self._arbitrate, ip, config.RATE_LIMIT_ARBITRATE_PER_MINUTE, now)
             limit = config.RATE_LIMIT_ARBITRATE_PER_MINUTE
+        elif path.endswith("/execute-demo") and not (scope.get("state") or {}).get("authenticated"):
+            ok = self._hit(self._demo, ip, config.RATE_LIMIT_DEMO_PER_MINUTE, now)
+            limit = config.RATE_LIMIT_DEMO_PER_MINUTE
         else:
             ok = self._hit(self._general, ip, config.RATE_LIMIT_PER_MINUTE, now)
             limit = config.RATE_LIMIT_PER_MINUTE
@@ -255,7 +259,7 @@ async def health() -> dict:
         "gemini_mode": config.GEMINI_MODE,
         "active_contracts": len(CONTRACTS),
         "persistence": "sqlite" if db_enabled() else "memory",
-        "storage": "postgres" if config.DATABASE_URL.strip() else "ephemeral",
+        "storage": "durable" if config.DATABASE_URL.strip() else "ephemeral",
         "sandbox": {
             "backend": "docker" if docker_available() else "native",
             "docker_available": docker_available(),
@@ -389,7 +393,9 @@ async def create_contract(req: ContractCreateRequest, user=Depends(require_user)
 
 
 @app.post("/api/contracts/execute-demo")
-async def execute_demo(req: ExecuteDemoRequest, user=Depends(require_user)) -> dict:
+async def execute_demo(req: ExecuteDemoRequest, request: Request, user=Depends(require_user)) -> dict:
+    if user is not None:
+        (request.scope.setdefault("state", {}))["authenticated"] = True
     try:
         if req.contract_id:
             if user is None:
@@ -397,6 +403,12 @@ async def execute_demo(req: ExecuteDemoRequest, user=Depends(require_user)) -> d
             party_or_404(req.contract_id, user)
             require_role(user, CONTRACTS[req.contract_id], "hirer", "re-run this contract")
             contract = CONTRACTS.get(req.contract_id)
+            if (contract.state or "FUNDED") in ("ACCEPTED", "SUBMITTED", "ARBITRATING"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="a worker has accepted this contract — re-running the scenario "
+                           "would pull the rug; the contract proceeds to arbitration",
+                )
             return await run_full_cycle(contract=contract, broadcast=bus.broadcast)
         if not req.scenario_id:
             raise HTTPException(status_code=422, detail="provide scenario_id or contract_id")
@@ -417,6 +429,29 @@ async def list_contracts(user=Depends(require_user)) -> dict:
         "contracts": [c.model_dump() for c in CONTRACTS.values() if c.id in visible],
         "escrows": [e.model_dump() for e in ESCROWS.values() if e.contract_id in visible],
     }
+
+
+def _redact(c: TaskContract) -> dict:
+    d = c.model_dump()
+    d.pop("test_code", None)
+    d.pop("worker_code", None)
+    return d
+
+
+@app.get("/api/contracts/open")
+async def open_board(_user=Depends(require_user)) -> dict:
+    """Funded, unclaimed contracts. Never exposes tests or reference code."""
+    open_items = []
+    for c in CONTRACTS.values():
+        esc = ESCROWS.get(c.id)
+        if esc is None or esc.status != "AUTHORIZED":
+            continue
+        if (c.state or "FUNDED") != "FUNDED":
+            continue
+        if getattr(c, "is_demo", False):
+            continue
+        open_items.append(_redact(c))
+    return {"contracts": open_items, "count": len(open_items)}
 
 
 @app.get("/api/contracts/{contract_id}")
@@ -535,6 +570,7 @@ async def create_draft_contract(req: ContractCreateRequest, user=Depends(require
         timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
         state="DRAFT",
         owner_id=(user.id if user else ""),
+        hirer_id=(user.id if user else ""),
     )
     contract.arbiter_weights = {
         "tests": config.W_TESTS, "schema": config.W_SCHEMA, "llm": config.W_LLM,
@@ -805,6 +841,7 @@ async def maintenance_sweep(_user=Depends(require_user)) -> dict:
     return {"swept": swept, "count": len(swept)}
 
 
+@app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket) -> None:
     """First frame must be {"token": "..."}; only the caller's own contract
     events are delivered afterwards."""

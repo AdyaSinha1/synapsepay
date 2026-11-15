@@ -28,16 +28,16 @@ export default function App() {
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Login />} />
       <Route element={<Shell />}>
-        <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/contracts" element={<Contracts />} />
-        <Route path="/contracts/new" element={<Wizard />} />
-        <Route path="/contracts/:id" element={<ContractDetail />} />
-        <Route path="/contracts/:id/workspace" element={<Workspace />} />
-        <Route path="/board" element={<Board />} />
+        <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />
+        <Route path="/contracts" element={<RequireAuth><Contracts /></RequireAuth>} />
+        <Route path="/contracts/new" element={<RequireAuth><Wizard /></RequireAuth>} />
+        <Route path="/contracts/:id" element={<RequireAuth><ContractDetail /></RequireAuth>} />
+        <Route path="/contracts/:id/workspace" element={<RequireAuth><Workspace /></RequireAuth>} />
+        <Route path="/board" element={<RequireAuth><Board /></RequireAuth>} />
         <Route path="/studio" element={<DemoStudio />} />
         <Route path="/agents" element={<Agents />} />
-        <Route path="/arbiter" element={<Arbiter />} />
-        <Route path="/payments" element={<Payments />} />
+        <Route path="/arbiter" element={<RequireAuth><Arbiter /></RequireAuth>} />
+        <Route path="/payments" element={<RequireAuth><Payments /></RequireAuth>} />
         <Route
           path="/settings"
           element={

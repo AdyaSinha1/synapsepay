@@ -54,7 +54,7 @@ export default function Landing() {
             </Link>
           )}
           <button className="btn-ghost px-6 py-3 text-base" onClick={runDemo} disabled={running}>
-            {running ? "Running…" : "Try a live demo"}
+            {running ? "Running…" : "Run a demo (simulated)"}
           </button>
         </div>
         {demoState && demoState !== "running" && demoState !== "error" && (

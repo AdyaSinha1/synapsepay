@@ -177,3 +177,57 @@ def test_401_for_unauthenticated_business_calls(enforced_auth):
 def test_state_machine_allows_dispute_paths():
     assert can_transition("SUBMITTED", "DISPUTED")
     assert can_transition("DISPUTED", "SUBMITTED")
+
+
+def _client():
+    return TestClient(app)
+
+
+def test_open_board_is_redacted_and_only_funded_unclaimed(enforced_auth):
+    with TestClient(app) as client:
+        hirer_name, hirer, hirer_id = _register(client, "hirer", "h")
+        contract = _funded_contract(client, hirer, "redaction probe")
+        cid = contract["id"]
+
+        board_resp = client.get("/api/contracts/open", headers=hirer)
+        assert board_resp.status_code == 200, board_resp.text[:200]
+        board = board_resp.json()["contracts"]
+        match = [c for c in board if c["id"] == cid]
+        assert match, "funded unclaimed contract must be on the open board"
+        assert "test_code" not in match[0], "hidden tests must never be exposed"
+        assert "worker_code" not in match[0]
+
+        # once claimed it leaves the board
+        _, worker, worker_id = _register(client, "worker", "w")
+        assert client.post(f"/api/contracts/{cid}/accept", json={}, headers=worker).status_code == 200
+        board_after = client.get("/api/contracts/open", headers=hirer).json()["contracts"]
+        assert all(c["id"] != cid for c in board_after)
+
+
+def test_rug_pull_guard_blocks_scenario_rerun_after_accept(enforced_auth):
+    with TestClient(app) as client:
+        hirer_name, hirer, hirer_id = _register(client, "hirer", "h")
+        contract = _funded_contract(client, hirer)
+        cid = contract["id"]
+
+        _, worker, worker_id = _register(client, "worker", "w")
+        assert client.post(f"/api/contracts/{cid}/accept", json={}, headers=worker).status_code == 200
+
+        rerun = client.post("/api/contracts/execute-demo", json={"contract_id": cid}, headers=hirer)
+        assert rerun.status_code == 409
+        assert "rug" in rerun.json()["detail"]
+
+
+def test_anonymous_demo_is_rate_limited_per_ip():
+    client = _client()
+    codes = []
+    for _ in range(config.RATE_LIMIT_DEMO_PER_MINUTE + 2):
+        resp = client.post("/api/contracts/execute-demo", json={"scenario_id": "A"})
+        codes.append(resp.status_code)
+    assert 429 in codes, "anonymous demo runs must be rate limited per IP"
+
+
+def test_storage_reports_ephemeral_without_database_url():
+    client = _client()
+    health = client.get("/api/health").json()
+    assert health["storage"] in ("durable", "ephemeral")

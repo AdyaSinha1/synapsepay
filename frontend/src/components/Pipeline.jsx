@@ -12,6 +12,7 @@ export default function Pipeline({ stage, running, decision }) {
   return (
     <ol className="space-y-0">
       {STAGES.map((node, i) => {
+        const Icon = node.icon;
         const done = i < stage;
         const active = running && i === stage;
         const failed = i === 4 && done && decision === "VOID";
@@ -19,7 +20,6 @@ export default function Pipeline({ stage, running, decision }) {
         const isArbiter = i === 3;
         const isSettle = i === 4;
         let tint = "bg-plum-50 text-mute/60 border border-line";
-        let icon = node.icon;
         if (done && failed) tint = "bg-coral-100 text-coral border border-coral/30";
         else if (done && partial) tint = "bg-sun-100 text-sun border border-sun/40";
         else if (done) tint = "bg-volt-soft text-volt-ink border border-volt-deep/40";
@@ -30,7 +30,7 @@ export default function Pipeline({ stage, running, decision }) {
           <li key={node.title}>
             <div className={`flex items-center gap-3 rounded-xl border px-3.5 py-3 transition-all ${active ? "border-lilac/50 bg-lilac-100/50" : "border-transparent"}`}>
               <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${tint}`}>
-                {active ? <Loader2 className="h-4 w-4 animate-spin" /> : done ? <CheckCircle2 className="h-4 w-4" /> : icon}
+                {active ? <Loader2 className="h-4 w-4 animate-spin" /> : done ? <CheckCircle2 className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
               </div>
               <div className="min-w-0 flex-1">
                 <p className={`text-sm font-semibold ${done || active ? "text-ink" : "text-mute/70"}`}>{node.title}</p>

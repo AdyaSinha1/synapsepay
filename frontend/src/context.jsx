@@ -8,6 +8,7 @@ import {
   fundComplete,
   fundStart,
   getContracts,
+  getOpenBoard,
   getHealth,
   getMetrics,
   getRecentEvents,
@@ -43,6 +44,7 @@ export function AppProvider({ children }) {
   const [scenarios, setScenarios] = useState([]);
   const [metrics, setMetrics] = useState(null);
   const [contractsRaw, setContractsRaw] = useState(null);
+  const [openBoard, setOpenBoard] = useState([]);
   const [lastRun, setLastRun] = useState(null);
   const [lastEscrow, setLastEscrow] = useState(null);
   const [liveEvents, setLiveEvents] = useState([]);
@@ -77,10 +79,14 @@ export function AppProvider({ children }) {
 
   const refreshData = useCallback(async () => {
     try {
-      const [h, m, c] = await Promise.all([getHealth(), getMetrics(), getContracts()]);
+      const [h, m, c, ob] = await Promise.all([
+        getHealth(), getMetrics(), getContracts(),
+        getOpenBoard().catch(() => []),
+      ]);
       setHealth(h);
       setMetrics(m);
       setContractsRaw(c);
+      setOpenBoard(Array.isArray(ob) ? ob : ob.contracts || []);
       setEverFailed(false);
     } catch {
       setHealth(null);
@@ -89,13 +95,14 @@ export function AppProvider({ children }) {
   }, []);
 
   useEffect(() => {
-    getScenarios().then(setScenarios).catch(() => {});
+    getScenarios().then((d) => setScenarios(Array.isArray(d) ? d : d.scenarios || [])).catch(() => {});
     refreshData();
     const id = setInterval(refreshData, 12000);
     return () => clearInterval(id);
   }, [refreshData]);
 
   useEffect(() => {
+    if (!user) return undefined; // the socket requires an auth frame; connect after sign-in
     let closed = false;
     let ws;
     const connect = () => {
@@ -123,7 +130,7 @@ export function AppProvider({ children }) {
       closed = true;
       if (ws) ws.close();
     };
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     const load = () => getRecentEvents(25).then((d) => setBellEvents(d.events || [])).catch(() => {});
@@ -254,7 +261,7 @@ export function AppProvider({ children }) {
   const contracts = zipContracts(contractsRaw);
 
   const value = {
-    health, everFailed, scenarios, metrics, contractsRaw, contracts,
+    health, everFailed, scenarios, metrics, contractsRaw, contracts, openBoard,
     lastRun, lastEscrow, liveEvents, runStage, running, activeScenario,
     user, bellEvents,
     toast, errorPanel, showError, showToast,

@@ -3,6 +3,7 @@ services:
     name: synapsepay-api
     runtime: python
     plan: free
+    autoDeploy: true
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -14,11 +15,31 @@ services:
         value: gemini-2.0-flash
       - key: DOCS_ENABLED
         value: "false"
+      # Auth is ON by default — strangers must register before touching contracts.
+      - key: REQUIRE_AUTH
+        value: "true"
+      # Admin token for dispute resolution (generateValue creates a secret once).
+      - key: ADMIN_TOKEN
+        generateValue: true
+      # Durable storage (recommended): create a free Neon/Supabase Postgres and
+      # paste its connection string, e.g.
+      #   postgresql://user:pass@ep-xyz.eu-central-1.aws.neon.tech/synapsepay?sslmode=require
+      # Without it the API runs on SQLite and /api/health reports storage=ephemeral
+      # (data resets on every redeploy).
+      - key: DATABASE_URL
+        sync: false
+      # Sandbox credentials are optional; without them PayPal runs simulated.
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET
         sync: false
+      # Optional: without it the arbiter uses the deterministic heuristic rubric.
       - key: GEMINI_API_KEY
         sync: false
+      # The deployed dashboard origin (locked to the Vercel URL).
       - key: CORS_ORIGINS
-        sync: false
+        value: https://synapsepay-lovat.vercel.app
+      # Sandbox backend: native subprocess on Render (no Docker daemon) —
+      # /api/health reports sandbox.backend=native, i.e. NOT container-isolated.
+      - key: SANDBOX_BACKEND
+        value: native

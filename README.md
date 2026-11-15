@@ -219,6 +219,12 @@ use vaulted payment methods or partner-based approvals.
 | POST | `/api/contracts/{id}/submit` | Worker submits a deliverable (blocked after settlement) |
 | POST | `/api/contracts/{id}/arbitrate` | Run arbiter; triggers capture / partial / void / remediation |
 | GET | `/api/contracts/{id}/evaluations` | Immutable audit trail of every arbitration round |
+| GET | `/api/contracts/open` | Redacted open board (funded, unclaimed; never tests/worker code) |
+| POST | `/api/contracts/{id}/accept` | Worker claims a funded contract (exclusive) |
+| POST | `/api/contracts/{id}/cancel` | Hirer cancels; hold released |
+| POST | `/api/auth/register` / login / me / logout / logout-all | First-party accounts (scrypt, hashed sessions) |
+| POST | `/api/sandbox/preview` | Wizard dry-run: tests vs sample code |
+| GET | `/api/paypal/config` | Sandbox mode + client id for the JS SDK |
 | GET | `/api/contracts` / `/api/contracts/{id}` | Inspect contracts, escrows, deliverables |
 | WS | `/ws/events` | Live event stream (same payload as forensic logs) |
 | GET | `/docs` | Interactive OpenAPI UI |

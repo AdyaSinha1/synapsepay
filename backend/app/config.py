@@ -45,6 +45,7 @@ DEADLINE_HOURS_MAX = _env_float("DEADLINE_HOURS_MAX", 24 * 29)
 
 RATE_LIMIT_PER_MINUTE = _env_int("RATE_LIMIT_PER_MINUTE", 600)
 RATE_LIMIT_ARBITRATE_PER_MINUTE = _env_int("RATE_LIMIT_ARBITRATE_PER_MINUTE", 12)
+RATE_LIMIT_DEMO_PER_MINUTE = _env_int("RATE_LIMIT_DEMO_PER_MINUTE", 10)
 LOGIN_THROTTLE_LIMIT = _env_int("LOGIN_THROTTLE_LIMIT", 10)
 
 DOCS_ENABLED = os.getenv("DOCS_ENABLED", "true").lower() in ("1", "true", "yes")
@@ -78,7 +79,7 @@ CORS_ORIGINS = [
 CORS_METHODS = ["GET", "POST", "OPTIONS"]
 CORS_HEADERS = ["Content-Type", "Authorization"]
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "2.0.0"
 
 PAYPAL_MODE = "live_sandbox" if (PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET) else "simulated"
 GEMINI_MODE = "live" if GEMINI_API_KEY else "heuristic_fallback"

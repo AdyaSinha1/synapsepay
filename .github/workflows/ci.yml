@@ -33,6 +33,70 @@ jobs:
           alembic upgrade head
           alembic current
 
+  backend-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: synapsepay
+          POSTGRES_PASSWORD: synapsepay
+          POSTGRES_DB: synapsepay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U synapsepay"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Alembic migration on fresh Postgres
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://synapsepay:synapsepay@localhost:5432/synapsepay_test
+        run: |
+          alembic upgrade head
+          alembic current
+      - name: Backend tests against Postgres
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://synapsepay:synapsepay@localhost:5432/synapsepay_test
+          PERSISTENCE_ENABLED: "true"
+        run: python -m pytest tests -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+      - name: Start API locally
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:///./smoke.db
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/api/health && break || sleep 2
+          done
+      - name: Run smoke script
+        run: python scripts/smoke.py --base-url http://127.0.0.1:8000
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -76,3 +140,7 @@ jobs:
         env:
           E2E_PYTHON: python3
         run: npx playwright test
+
+  # The backend job above also runs the smoke script against a locally
+  # started API (see the `smoke` job), so every PR proves: ownership 404s,
+  # auth 401s, funding, acceptance, submission, arbitration, settlement.

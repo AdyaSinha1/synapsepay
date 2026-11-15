@@ -15,7 +15,7 @@ export async function api(path, options = {}) {
     headers,
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (res.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+  if (res.status === 401 && getToken() && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
     setSession(null);
     window.location.assign("/login");
     throw new Error("Session expired — sign in again");
@@ -39,6 +39,7 @@ export const getHealth = () => api("/api/health");
 export const getScenarios = () => api("/api/scenarios");
 export const getMetrics = () => api("/api/metrics");
 export const getContracts = () => api("/api/contracts");
+export const getOpenBoard = () => api("/api/contracts/open", { timeout: 8000 });
 export const getContract = (id) => api(`/api/contracts/${id}`);
 export const getContractEvaluations = (id) => api(`/api/contracts/${id}/evaluations`);
 export const getContractSubmissions = (id) => api(`/api/contracts/${id}/submissions`);
